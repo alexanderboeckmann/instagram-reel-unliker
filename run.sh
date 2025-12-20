@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-# Color codes
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -9,7 +8,6 @@ MAGENTA='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# Detect OS
 if [[ "$OSTYPE" == "darwin"* ]]; then
     OS="macOS"
 elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "win32" ]]; then
@@ -20,11 +18,8 @@ fi
 
 # Function to check for root/sudo
 check_root() {
-    if [ "$OS" != "Windows" ] && [ "$EUID" -ne 0 ]; then
-        echo -e "${RED}[!] Error: This script requires root privileges${NC}"
-        echo -e "${YELLOW}[i] Please run with sudo${NC}"
-        exit 1
-    fi
+    # Root check removed - not needed for user-level operations
+    return 0
 }
 
 # Function to install package manager
@@ -51,35 +46,43 @@ install_package() {
     echo -e "${BLUE}[*] Checking $package installation...${NC}"
     
     if ! command -v $package &> /dev/null; then
-        echo -e "${YELLOW}[+] Installing $package...${NC}"
+        echo -e "${YELLOW}[+] $package not found. Installing...${NC}"
+        
         if [ "$OS" = "macOS" ]; then
-            brew install $package || return 1
+            brew install $package || {
+                echo -e "${YELLOW}[!] Could not install $package. Please install manually with: brew install $package${NC}"
+                return 1
+            }
         elif [ "$OS" = "Linux" ]; then
-            if command -v apt-get &> /dev/null; then
-                apt-get update && apt-get install -y $package || return 1
-            elif command -v dnf &> /dev/null; then
-                dnf install -y $package || return 1
-            fi
+            echo -e "${YELLOW}[!] Please install $package manually${NC}"
+            return 1
         fi
     fi
+    
     echo -e "${GREEN}[✓] $package check passed${NC}"
     return 0
 }
 
 # Header
-echo -e "${BLUE}[*]=======================================${NC}"
-echo -e "${YELLOW}[+] Instagram Mass Unliker - Setup Utility${NC}"
-echo -e "${BLUE}[*]=======================================${NC}"
+clear
+echo -e "${BLUE}"
+echo "╔════════════════════════════════════════════════╗"
+echo "║     Instagram Mass Unliker - Setup Utility    ║"
+echo "║           Fast, Secure, Undetectable          ║"
+echo "╚════════════════════════════════════════════════╝"
+echo -e "${NC}"
 echo
 
-# Check root privileges
-check_root
+# Check root privileges (skip on Windows)
+if [ "$OS" != "Windows" ]; then
+    check_root
+fi
 
 # Install package manager
 install_package_manager
 
 # Install required packages
-for package in git python3 python3-pip ffmpeg; do
+for package in git python3 python3-pip; do
     install_package $package || {
         echo -e "${RED}[!] Failed to install $package${NC}"
         exit 1
@@ -115,25 +118,39 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+echo -e "${GREEN}[✓] Virtual environment activated${NC}"
+
+# Upgrade pip
+echo -e "${BLUE}[*] Upgrading pip...${NC}"
+python -m pip install --upgrade pip --quiet
+
 # Install Python dependencies
 echo -e "${BLUE}[*] Installing Python dependencies...${NC}"
-python -m pip install --upgrade pip
-pip install ensta==5.2.9 tqdm==4.67.1 colorama==0.4.6 requests==2.32.3 || {
+pip install --no-cache-dir ensta==5.2.9 tqdm==4.67.1 colorama==0.4.6 requests==2.32.3 psutil || {
     echo -e "${RED}[!] Failed to install Python dependencies${NC}"
     exit 1
 }
 
-echo -e "${GREEN}[✓] Virtual environment setup complete${NC}"
+echo -e "${GREEN}[✓] All dependencies installed successfully${NC}"
+echo
 
 # Run the main script
-echo -e "${BLUE}[*] Starting Instagram Mass Unliker...${NC}"
+echo -e "${CYAN}[*] Starting Instagram Mass Unliker...${NC}"
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo
+
 python instagram_unliker.py
-if [ $? -ne 0 ]; then
-    echo -e "${RED}[!] Program exited with errors${NC}"
-    exit 1
-fi
+
+exit_code=$?
 
 # Deactivate virtual environment
 deactivate
 
+if [ $exit_code -ne 0 ]; then
+    echo -e "${RED}[!] Program exited with errors${NC}"
+    exit 1
+fi
+
+echo
 echo -e "${GREEN}[✓] Program completed successfully${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"

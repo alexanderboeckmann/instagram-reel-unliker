@@ -57,6 +57,7 @@ A powerful and free open-source Instagram automation tool for managing your digi
 - **Error Handling**: Automatic retry on failures
 - **Configurable Settings**: Customize to your needs
 - **Activity Logging**: Track your operations
+- **Exclude Users**: Exclude users from the like removing, so specific liked posts do not get removed!
 
 ## 🚀 Quick Start Guide
 
@@ -137,7 +138,7 @@ The installer handles all dependencies automatically:
 
 ### Quick Usage Guide
 1. **Installation**
-   - Windows: Run `run.bat`
+   - Windows: Run `run.bat` -> I didn't update this
    - macOS/Linux: Execute `run.sh`
 2. **Setup**: Add Instagram Account, then provide your login credentials, and then start the unliking process
 3. **Operation**: Follow the interactive dashboard
@@ -185,5 +186,6 @@ This tool is for educational purposes only. Use responsibly and in accordance wi
 ---
 
 <div align="center">
-Made with ❤️ by u/TahaGorme
+Made with ❤️ TahaGorme
+Added feature of excluding instagram accounts by me
 </div>
