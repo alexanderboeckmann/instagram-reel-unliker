@@ -82,7 +82,14 @@ fi
 install_package_manager
 
 # Install required packages
-for package in git python3 python3-pip; do
+# Note: python3-pip is not a Homebrew formula on macOS — pip ships with Python
+if [ "$OS" = "macOS" ]; then
+    PACKAGES="git python3"
+else
+    PACKAGES="git python3 python3-pip"
+fi
+ 
+for package in $PACKAGES; do
     install_package $package || {
         echo -e "${RED}[!] Failed to install $package${NC}"
         exit 1
@@ -126,7 +133,7 @@ python -m pip install --upgrade pip --quiet
 
 # Install Python dependencies
 echo -e "${BLUE}[*] Installing Python dependencies...${NC}"
-pip install --no-cache-dir ensta==5.2.9 tqdm==4.67.1 colorama==0.4.6 requests==2.32.3 psutil || {
+pip install --no-cache-dir ensta==5.2.9 tqdm==4.67.1 colorama==0.4.6 requests==2.32.3 psutil "moviepy<2.0" || {
     echo -e "${RED}[!] Failed to install Python dependencies${NC}"
     exit 1
 }
