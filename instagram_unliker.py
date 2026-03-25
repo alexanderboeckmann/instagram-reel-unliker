@@ -385,25 +385,76 @@ class InstagramUnliker:
         except Exception as e:
             print(f"{ConsoleColors.RED}[✗] Failed to save configuration: {str(e)}{ConsoleColors.RESET}")
 
+    def _load_following(self) -> Set[str]:
+        """Load the set of usernames the account follows from following.json"""
+        following_file = 'following.json'
+        if not os.path.exists(following_file):
+            logging.info("following.json not found — following filter disabled")
+            return set()
+        try:
+            with open(following_file, 'r') as f:
+                data = json.load(f)
+            following = {
+                entry['title'].lower()
+                for entry in data.get('relationships_following', [])
+                if entry.get('title')
+            }
+            logging.info(f"Loaded {len(following)} followed accounts from following.json")
+            return following
+        except Exception as e:
+            logging.warning(f"Could not load following.json: {e}")
+            return set()
+
+    @staticmethod
+    def _parse_liked_post(post: dict):
+        """
+        Parse a single entry from liked_posts.json (new flat-list format).
+
+        Returns (url, post_username) or (None, None) if the entry is malformed.
+        The post_username is lowercased for consistent comparison.
+        """
+        url = None
+        post_username = None
+        try:
+            for lv in post.get('label_values', []):
+                # Top-level URL entry
+                if lv.get('label') == 'URL' and lv.get('value'):
+                    url = lv['value']
+                # Owner block — nested dict structure
+                if lv.get('title') == 'Owner':
+                    for owner_entry in lv.get('dict', []):
+                        for field in owner_entry.get('dict', []):
+                            if field.get('label') == 'Username' and field.get('value'):
+                                post_username = field['value'].lower()
+        except Exception:
+            pass
+        return url, post_username
+
     def unlike_posts(self, username: str):
-        """Unlike posts using JSON file with exclude list support"""
+        """Unlike reels using liked_posts.json, skipping followed accounts and excluded users"""
         account_file = self.accounts_dir / f"{username}.json"
         progress_bar = None
-        
+
         if not account_file.exists():
             error_msg = f"Account file not found for {username}"
             logging.error(error_msg)
             print(f"\n{ConsoleColors.RED}[✗] {error_msg}. Please add it first.{ConsoleColors.RESET}")
             return
-            
+
         try:
             with open(account_file, 'r') as f:
                 account_data = json.load(f)
-            
-            print(f"\n{ConsoleColors.CYAN}Starting to unlike posts for @{username}...{ConsoleColors.RESET}")
+
+            print(f"\n{ConsoleColors.CYAN}Starting to unlike reels for @{username}...{ConsoleColors.RESET}")
+
+            # Load following list for skip logic
+            following = self._load_following()
+            if following:
+                print(f"{ConsoleColors.BLUE}ℹ️  Loaded {len(following)} followed accounts — their reels will be skipped{ConsoleColors.RESET}")
+
             if self.excluded_users:
-                print(f"{ConsoleColors.YELLOW}ℹ️  Excluding {len(self.excluded_users)} users from unliking{ConsoleColors.RESET}")
-            
+                print(f"{ConsoleColors.YELLOW}ℹ️  Excluding {len(self.excluded_users)} manually excluded users{ConsoleColors.RESET}")
+
             try:
                 from ensta import Web
                 client = Web(account_data['username'], account_data['password'])
@@ -425,66 +476,85 @@ class InstagramUnliker:
 
             try:
                 with open('liked_posts.json', 'r') as f:
-                    liked_data = json.load(f)
-                    
-                if not liked_data.get('likes_media_likes'):
-                    error_msg = "No liked posts found in JSON file"
-                    logging.warning(error_msg)
-                    print(f"{ConsoleColors.YELLOW}[!] {error_msg}!{ConsoleColors.RESET}")
+                    raw_posts = json.load(f)
+
+                # liked_posts.json is a flat list in the new export format
+                if isinstance(raw_posts, dict):
+                    # Fallback: old format wrapper key
+                    raw_posts = raw_posts.get('likes_media_likes', [])
+
+                if not raw_posts:
+                    print(f"{ConsoleColors.YELLOW}[!] No liked posts found in liked_posts.json{ConsoleColors.RESET}")
                     return
-                
-                # Filter out excluded users
-                original_count = len(liked_data['likes_media_likes'])
-                filtered_posts = [
-                    post for post in liked_data['likes_media_likes']
-                    if post['title'].lower() not in self.excluded_users
-                ]
-                excluded_count = original_count - len(filtered_posts)
-                
-                if excluded_count > 0:
-                    print(f"{ConsoleColors.YELLOW}🚫 Skipped {excluded_count} posts from excluded users{ConsoleColors.RESET}")
-                
-                liked_data['likes_media_likes'] = filtered_posts
-                total_posts = len(filtered_posts)
-                unliked_count = 0
-                skipped_count = 0
+
+                # ── Filter pass ──────────────────────────────────────────────
+                reels_only: list = []
+                skipped_not_reel = 0
+                skipped_following = 0
+                skipped_excluded = 0
+
+                for post in raw_posts:
+                    url, post_username = self._parse_liked_post(post)
+
+                    # Must be a reel URL
+                    if not url or '/reel/' not in url:
+                        skipped_not_reel += 1
+                        continue
+
+                    # Skip accounts we follow
+                    if post_username and post_username in following:
+                        skipped_following += 1
+                        logging.debug(f"Skipping reel from followed account: @{post_username}")
+                        continue
+
+                    # Skip manually excluded users
+                    if post_username and post_username in self.excluded_users:
+                        skipped_excluded += 1
+                        logging.debug(f"Skipping reel from excluded user: @{post_username}")
+                        continue
+
+                    # Store parsed values alongside the post for the loop below
+                    reels_only.append((post, url, post_username))
+
+                total_posts = len(reels_only)
+
+                print(f"\n{ConsoleColors.BLUE}📊 Filter summary:{ConsoleColors.RESET}")
+                print(f"  {ConsoleColors.GREEN}Reels to unlike : {total_posts}{ConsoleColors.RESET}")
+                print(f"  {ConsoleColors.YELLOW}Non-reel posts  : {skipped_not_reel} (skipped){ConsoleColors.RESET}")
+                print(f"  {ConsoleColors.YELLOW}From following  : {skipped_following} (skipped){ConsoleColors.RESET}")
+                if skipped_excluded:
+                    print(f"  {ConsoleColors.YELLOW}Excluded users  : {skipped_excluded} (skipped){ConsoleColors.RESET}")
 
                 if total_posts == 0:
-                    print(f"{ConsoleColors.YELLOW}No posts to unlike after filtering{ConsoleColors.RESET}")
+                    print(f"{ConsoleColors.YELLOW}No reels to unlike after filtering{ConsoleColors.RESET}")
                     return
 
-                print(f"{ConsoleColors.BLUE}Found {total_posts} posts to unlike{ConsoleColors.RESET}")
-                
+                unliked_count = 0
+                failed_urls: list = []
+
                 progress_bar = tqdm(
                     total=total_posts,
-                    desc=f"🔄 Unliking posts",
+                    desc="🔄 Unliking reels",
                     bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [ETA: {remaining}]'
                 )
-                
-                while liked_data['likes_media_likes'] and self.running:
+
+                for post, url, post_username in reels_only:
+                    if not self.running:
+                        break
                     try:
                         base_delay = random.uniform(CONFIG['delay']['min'], CONFIG['delay']['max'])
-                        actual_delay = base_delay * CONFIG['accounts'][username].get('delay_multiplier', 1.0)
+                        actual_delay = base_delay * CONFIG['accounts'].get(username, {}).get('delay_multiplier', 1.0)
                         time.sleep(actual_delay)
-                        
-                        post = liked_data['likes_media_likes'].pop(0)
-                        post_username = post['title'].lower()
-                        
-                        # Double-check exclusion (safety)
-                        if post_username in self.excluded_users:
-                            skipped_count += 1
-                            progress_bar.update(1)
-                            continue
-                        
-                        media_id = instagram_code_to_media_id(post['string_list_data'][0]['href'])
-                        
+
+                        media_id = instagram_code_to_media_id(url)
+
                         # Unlike with retry mechanism
                         for retry in range(CONFIG['max_retries']):
                             try:
                                 client.unlike(media_id)
                                 break
                             except Exception as e:
-                                error_msg = f"Failed to unlike post (attempt {retry + 1}/{CONFIG['max_retries']}): {str(e)}"
+                                error_msg = f"Failed to unlike reel (attempt {retry + 1}/{CONFIG['max_retries']}): {str(e)}"
                                 logging.warning(error_msg)
                                 if retry < CONFIG['max_retries'] - 1:
                                     time.sleep(CONFIG['retry_delay'])
@@ -494,37 +564,34 @@ class InstagramUnliker:
                         unliked_count += 1
                         account_data['total_unliked'] += 1
                         progress_bar.update(1)
-                        
-                        # Update JSON file
-                        with open('liked_posts.json', 'w') as f:
-                            json.dump(liked_data, f, indent=4)
-                        
+
                         # Random break
                         if random.random() < CONFIG['break']['probability']:
                             break_time = random.uniform(CONFIG['break']['min'], CONFIG['break']['max'])
                             progress_bar.write(f"{ConsoleColors.BLUE}[*] Taking a break for {break_time/60:.1f} minutes...{ConsoleColors.RESET}")
                             time.sleep(break_time)
-                            
+
                     except Exception as e:
-                        error_msg = f"Failed to unlike post: {str(e)}"
+                        error_msg = f"Failed to unlike reel {url}: {str(e)}"
                         logging.error(error_msg, exc_info=True)
                         progress_bar.write(f"{ConsoleColors.RED}[✗] {error_msg}{ConsoleColors.RESET}")
                         account_data['last_error'] = error_msg
+                        failed_urls.append(url)
                         time.sleep(300)  # 5 minute cooldown
-                        
+
             finally:
                 if progress_bar is not None:
                     progress_bar.close()
-                
+
             # Update account stats
             account_data['last_run'] = datetime.now().isoformat()
             with open(account_file, 'w') as f:
                 json.dump(account_data, f, indent=4)
-                
+
             print(f"\n{ConsoleColors.GREEN}[✓] Unliking complete for {username}{ConsoleColors.RESET}")
-            print(f"{ConsoleColors.BLUE}[*] Total unliked: {unliked_count}{ConsoleColors.RESET}")
-            if skipped_count > 0:
-                print(f"{ConsoleColors.YELLOW}[*] Skipped (excluded): {skipped_count}{ConsoleColors.RESET}")
+            print(f"{ConsoleColors.BLUE}[*] Reels unliked : {unliked_count}{ConsoleColors.RESET}")
+            if failed_urls:
+                print(f"{ConsoleColors.RED}[*] Failed        : {len(failed_urls)}{ConsoleColors.RESET}")
             
         except json.JSONDecodeError as e:
             error_msg = f"Invalid JSON format: {str(e)}"
