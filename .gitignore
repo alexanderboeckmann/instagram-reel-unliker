@@ -1,0 +1,24 @@
+# Personal Instagram data exports
+liked_posts.json
+following.json
+
+# Account credentials (contains passwords & TOTP secrets)
+accounts/
+
+# ensta login session (contains auth cookies)
+ensta-session.json
+
+# Runtime
+logs/
+*.bak
+
+# Python virtual environment
+venv/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# VS Code workspace
+*.code-workspace
