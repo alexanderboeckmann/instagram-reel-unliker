@@ -2,6 +2,7 @@
 import os
 import sys
 import json
+import hashlib
 import time
 import random
 import logging
@@ -27,6 +28,7 @@ DATA_DIR = BASE_DIR / "data"
 LIKED_POSTS_PATH = DATA_DIR / "liked_posts.json"
 FOLLOWING_PATH = DATA_DIR / "following.json"
 IMPORT_META_PATH = DATA_DIR / "import_meta.json"
+PROGRESS_DIR = DATA_DIR / "progress"
 EXPORT_SEARCH_DIRS = [Path.home() / "Downloads", Path.home() / "Desktop", BASE_DIR]
 
 LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
@@ -163,6 +165,49 @@ class SessionStore:
             self._keyring.delete_password(self.SERVICE, username)
         except Exception:
             pass
+
+
+class ProgressStore:
+    def __init__(self, username: str, fingerprint: str):
+        self.path = PROGRESS_DIR / f"{username}.txt"
+        self.fingerprint = fingerprint
+        self.done = self._read()
+        self._resuming = bool(self.done)
+        self._handle = None
+
+    def _read(self) -> Set[str]:
+        try:
+            lines = self.path.read_text(encoding='utf-8').splitlines()
+        except OSError:
+            return set()
+        if lines[:1] != [self.fingerprint]:
+            logging.info(f"Ignoring {self.path} — it was recorded against a different export")
+            return set()
+        return {line for line in lines[1:] if line}
+
+    def _open(self):
+        PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
+        self._handle = open(self.path, 'a' if self._resuming else 'w', encoding='utf-8')
+        if not self._resuming:
+            self._handle.write(f"{self.fingerprint}\n")
+
+    def record(self, url: str):
+        self.done.add(url)
+        try:
+            if self._handle is None:
+                self._open()
+            self._handle.write(f"{url}\n")
+            self._handle.flush()
+        except OSError as e:
+            logging.warning(f"Could not record progress to {self.path}: {e}")
+
+    def close(self):
+        if self._handle is not None:
+            try:
+                self._handle.close()
+            except OSError:
+                pass
+            self._handle = None
 
 
 class InstagramUnliker: 
@@ -393,6 +438,7 @@ class InstagramUnliker:
             if account_file.exists():
                 account_file.unlink()
 
+            (PROGRESS_DIR / f"{username}.txt").unlink(missing_ok=True)
             self.sessions.delete(username)
                 
             if username in CONFIG['accounts']:
@@ -786,6 +832,14 @@ class InstagramUnliker:
         self._offer_delete_source(source)
         return True
 
+    @staticmethod
+    def _export_fingerprint() -> str:
+        digest = hashlib.sha256()
+        with open(LIKED_POSTS_PATH, 'rb') as f:
+            for chunk in iter(lambda: f.read(1 << 20), b''):
+                digest.update(chunk)
+        return digest.hexdigest()[:16]
+
     def _load_following(self) -> Set[str]:
         if not FOLLOWING_PATH.exists():
             logging.info("following.json not found — following filter disabled")
@@ -834,6 +888,7 @@ class InstagramUnliker:
     def unlike_posts(self, username: str):
         account_file = self.accounts_dir / f"{username}.json"
         progress_bar = None
+        resume = None
 
         if not account_file.exists():
             error_msg = f"Account file not found for {username}"
@@ -900,6 +955,10 @@ class InstagramUnliker:
 
                     reels_only.append((post, url, post_username))
 
+                resume = ProgressStore(username, self._export_fingerprint())
+                if resume.done:
+                    reels_only = [entry for entry in reels_only if entry[1] not in resume.done]
+                already_done = len(resume.done)
                 total_posts = len(reels_only)
 
                 print(f"\n{ConsoleColors.BLUE}Filter summary:{ConsoleColors.RESET}")
@@ -908,9 +967,12 @@ class InstagramUnliker:
                 print(f"  {ConsoleColors.YELLOW}From following  : {skipped_following} (skipped){ConsoleColors.RESET}")
                 if skipped_excluded:
                     print(f"  {ConsoleColors.YELLOW}Excluded users  : {skipped_excluded} (skipped){ConsoleColors.RESET}")
+                if already_done:
+                    print(f"  {ConsoleColors.BLUE}Done earlier    : {already_done} (resuming){ConsoleColors.RESET}")
 
                 if total_posts == 0:
-                    warn("No reels to unlike after filtering")
+                    warn("Nothing left to unlike from this export" if already_done
+                         else "No reels to unlike after filtering")
                     return
 
                 unliked_count = 0
@@ -946,6 +1008,7 @@ class InstagramUnliker:
 
                         unliked_count += 1
                         account_data['total_unliked'] += 1
+                        resume.record(url)
                         progress_bar.update(1)
 
                         if random.random() < CONFIG['break']['probability']:
@@ -964,6 +1027,8 @@ class InstagramUnliker:
             finally:
                 if progress_bar is not None:
                     progress_bar.close()
+                if resume is not None:
+                    resume.close()
 
             account_data['last_run'] = datetime.now().isoformat()
             self._write_account(account_file, account_data)
@@ -972,6 +1037,9 @@ class InstagramUnliker:
             note(f"Reels unliked : {unliked_count}")
             if failed_urls:
                 note(f"Failed        : {len(failed_urls)}")
+            remaining = total_posts - unliked_count
+            if remaining:
+                note(f"Left to do    : {remaining} — pick 4 again to resume where this stopped")
             
         except json.JSONDecodeError as e:
             error_msg = f"Invalid JSON format: {str(e)}"
@@ -1064,7 +1132,9 @@ class InstagramUnliker:
             return
             
         header("Select Account")
-        
+
+        fingerprint = self._export_fingerprint() if LIKED_POSTS_PATH.exists() else None
+
         for i, acc in enumerate(accounts, 1):
             account_file = self.accounts_dir / f"{acc}.json"
             status = "Ready"
@@ -1075,7 +1145,11 @@ class InstagramUnliker:
                         status = "Error"
                     elif data.get('last_run'):
                         status = f"Last: {datetime.fromisoformat(data['last_run']).strftime('%Y-%m-%d %H:%M')}"
-            
+
+            done = len(ProgressStore(acc, fingerprint).done) if fingerprint else 0
+            if done:
+                status += f" - {done:,} done from this export"
+
             print(f"{ConsoleColors.BOLD}{i}{ConsoleColors.RESET}. [{acc}] - {status}")
             
         try:

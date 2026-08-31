@@ -24,6 +24,7 @@ Plus a manual exclude list on top of that, for accounts you don't follow but sti
 - [Running it](#running-it)
 - [Where your credentials live](#where-your-credentials-live)
 - [Long runs](#long-runs)
+- [Resuming an interrupted run](#resuming-an-interrupted-run)
 - [Configuration](#configuration)
 - [Known limitations](#known-limitations)
 - [License](#license)
@@ -176,6 +177,30 @@ Monitor from another window:
 tail -f logs/unliker.log
 ```
 
+## Resuming an interrupted run
+
+Each reel is appended to `data/progress/<username>.txt` and flushed the moment it is unliked, so a run that stops for any reason — Ctrl-C, a dropped connection, a closed laptop, a crash — loses at most the reel in flight. The next *Start Unliking* skips everything already done and reports it:
+
+```
+Filter summary:
+  Reels to unlike : 4,812
+  Non-reel posts  : 26,113 (skipped)
+  From following  : 884 (skipped)
+  Done earlier    : 1,204 (resuming)
+```
+
+The account picker shows the same count, so you can see how far along you are before starting. Reels that *failed* are deliberately not recorded — they come back around on the next run.
+
+The first line of the file is a fingerprint of `liked_posts.json`. Import a different export and the fingerprint stops matching, so the old progress is discarded: a fresh export has already dropped everything you unliked, and there is nothing left to skip.
+
+To start again from the top of the current export, delete the file:
+
+```bash
+rm data/progress/<username>.txt
+```
+
+Removing the account with menu option **2** deletes it too.
+
 ## Configuration
 
 `config.json`:
@@ -201,7 +226,6 @@ tail -f logs/unliker.log
 
 ## Known limitations
 
-- **No resume state.** `data/liked_posts.json` is never rewritten, so an interrupted run restarts from the top of the list on the next launch. Re-unliking an already-unliked reel is harmless but wastes the whole queue. A fresh export is the fastest way to resume.
 - **The stored session is readable by code running as you.** Keychain items this app writes are readable without a prompt by anything running under your user account. This protects against accidental commits, backups, cloud sync, and offline disk access — not against malware already running as you.
 - **No 2FA support.** There is no prompt for a verification code; login will fail if two-factor is enabled on the account.
 - **Rate limiting is a deterrent, not a guarantee.** Random delays and breaks reduce how mechanical the traffic looks. They do not make it invisible, and they are no protection against an action block.
