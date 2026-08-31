@@ -2,10 +2,10 @@
 liked_posts.json
 following.json
 
-# Account credentials (contains passwords & TOTP secrets)
+# Account stats
 accounts/
 
-# ensta login session (contains auth cookies)
+# legacy ensta login session (now stored in the Keychain)
 ensta-session.json
 
 # Runtime

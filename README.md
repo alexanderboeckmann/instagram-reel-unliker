@@ -94,7 +94,7 @@ Menu options:
 
 | | Action |
 |---|---|
-| 1 | Add Instagram account (also used to update a changed password) |
+| 1 | Add Instagram account (username only) |
 | 2 | Remove account |
 | 3 | Start unliking |
 | 4 | Manage excluded users |
@@ -102,7 +102,30 @@ Menu options:
 | 6 | Settings |
 | 0 | Exit |
 
-Add your account with **1**, then start with **3**. If you change your Instagram password later, re-add the account with **1** and answer `y` to replace, then delete `ensta-session.json` so the stale login cookie isn't reused.
+Add your account with **1** — username only, no password. Start with **3**; you are prompted for your password the first time, and only again once the saved session expires.
+
+If you change your Instagram password, nothing needs re-adding: the old session stops working and you are prompted for the new password on the next run.
+
+## 🔐 Where your credentials live
+
+Your Instagram password is **never written to disk and never stored anywhere** — not in a file, not in the keychain. It is typed at the prompt (not echoed), used once to obtain a login session, and dropped.
+
+What persists is the **login session**, which is what actually keeps you signed in. It is kept in the macOS Keychain under the service `instagram-reel-unliker-session`, keyed by username, so each account has its own session and there is no shared `ensta-session.json` on disk any more.
+
+Treat that session like a password — it grants account access on its own.
+
+```bash
+security find-generic-password -s instagram-reel-unliker-session -a <username>    # show entry
+security delete-generic-password -s instagram-reel-unliker-session -a <username>  # force re-login
+```
+
+`accounts/<username>.json` now holds only stats (last run, unlike count). The directory is `chmod 700` and the files `chmod 600`.
+
+**Migration is automatic.** On first launch, any password left in `accounts/<username>.json` is deleted, and an existing `ensta-session.json` is moved into the Keychain and removed from disk.
+
+Removing an account with menu option **2** deletes its Keychain session too.
+
+If the `keyring` package or a usable backend is missing, nothing is persisted and you are asked for your password on every run.
 
 ## ⏳ Long runs
 
@@ -153,7 +176,7 @@ tail -f logs/unliker.log
 ## ⚠️ Known limitations
 
 - **No resume state.** `liked_posts.json` is never rewritten, so an interrupted run restarts from the top of the list on the next launch. Re-unliking an already-unliked reel is harmless but wastes the whole queue. A fresh export is the fastest way to resume.
-- **Passwords are stored in plaintext** in `accounts/<username>.json`. The `accounts/` directory is gitignored, but the file is readable by anything running as your user.
+- **The stored session is readable by code running as you.** Keychain items this app writes are readable without a prompt by anything running under your user account. This protects against accidental commits, backups, cloud sync, and offline disk access — not against malware already running as you.
 - **No 2FA support.** There is no prompt for a verification code; login will fail if two-factor is enabled on the account.
 - **Rate limiting is a deterrent, not a guarantee.** Random delays and breaks reduce how mechanical the traffic looks. They do not make it invisible, and they are no protection against an action block.
 - **`run.bat` (Windows) is unmaintained** in this fork and has not been tested.

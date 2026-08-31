@@ -133,7 +133,7 @@ python -m pip install --upgrade pip --quiet
 
 # Install Python dependencies
 echo -e "${BLUE}[*] Installing Python dependencies...${NC}"
-pip install --no-cache-dir ensta==5.2.9 tqdm==4.67.1 colorama==0.4.6 requests==2.32.3 psutil "moviepy<2.0" || {
+pip install --no-cache-dir ensta==5.2.9 tqdm==4.67.1 colorama==0.4.6 requests==2.32.3 psutil keyring "moviepy<2.0" || {
     echo -e "${RED}[!] Failed to install Python dependencies${NC}"
     exit 1
 }

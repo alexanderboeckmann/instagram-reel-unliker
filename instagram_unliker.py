@@ -61,7 +61,56 @@ class ConsoleColors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
     RESET = '\033[0m'
-    
+
+
+class SessionStore:
+    SERVICE = "instagram-reel-unliker-session"
+
+    def __init__(self):
+        try:
+            import keyring
+            from keyring.backends.fail import Keyring as FailKeyring
+            self._keyring = None if isinstance(keyring.get_keyring(), FailKeyring) else keyring
+        except Exception as e:
+            logging.warning(f"Keyring unavailable, sessions will not be stored: {e}")
+            self._keyring = None
+
+    @property
+    def available(self) -> bool:
+        return self._keyring is not None
+
+    def load(self, username: str) -> str:
+        if not self.available:
+            return ""
+        try:
+            return self._keyring.get_password(self.SERVICE, username) or ""
+        except Exception as e:
+            logging.error(f"Keychain read failed: {e}")
+            return ""
+
+    def save(self, username: str, data: str) -> bool:
+        if not self.available:
+            return False
+        try:
+            blob = json.dumps(json.loads(data), separators=(',', ':'))
+        except Exception:
+            blob = data.strip()
+        try:
+            self._keyring.set_password(self.SERVICE, username, blob)
+            return True
+        except Exception as e:
+            logging.error(f"Keychain write failed: {e}")
+            return False
+
+    def delete(self, username: str):
+        if not self.available:
+            return
+        try:
+            self._keyring.delete_password(self.SERVICE, username)
+        except Exception:
+            pass
+
+
 class InstagramUnliker: 
     def __init__(self):
         """Initialize the Instagram Unliker application"""
@@ -72,6 +121,7 @@ class InstagramUnliker:
         self.logs_dir = Path("logs")
         self.running = True
         self.excluded_users: Set[str] = set()
+        self.sessions = SessionStore()
         
         self._create_required_directories()
         self._ensure_python_environment()
@@ -79,7 +129,62 @@ class InstagramUnliker:
         self.setup_logging()
         self.check_and_create_config()
         self._load_excluded_users()
+        self._migrate_credentials()
         
+    def _migrate_credentials(self):
+        legacy = Path("ensta-session.json")
+        if legacy.exists():
+            try:
+                data = json.loads(legacy.read_text())
+                owner = data.get('identifier') or data.get('username')
+                if owner and self.sessions.save(owner, json.dumps(data)):
+                    print(f"{ConsoleColors.GREEN}[✓] Moved @{owner}'s login session into the Keychain{ConsoleColors.RESET}")
+                    logging.info(f"Migrated session for {owner} into the Keychain")
+                legacy.unlink()
+            except Exception as e:
+                logging.warning(f"Could not migrate {legacy}: {e}")
+
+        for account_file in sorted(self.accounts_dir.glob("*.json")):
+            try:
+                data = json.loads(account_file.read_text())
+            except Exception:
+                continue
+            if data.pop('password', None) is not None:
+                username = data.get('username', account_file.stem)
+                self._write_account(account_file, data)
+                print(f"{ConsoleColors.GREEN}[✓] Removed @{username}'s stored password from {account_file}{ConsoleColors.RESET}")
+                logging.info(f"Stripped stored password for {username}")
+
+    def _write_account(self, account_file: Path, data: dict):
+        data.pop('password', None)
+        with open(account_file, 'w') as f:
+            json.dump(data, f, indent=4)
+        try:
+            os.chmod(account_file, 0o600)
+        except OSError as e:
+            logging.warning(f"Could not tighten permissions on {account_file}: {e}")
+
+    def _prompt_password(self, username: str) -> str:
+        return getpass(f"{ConsoleColors.BOLD}Password for @{username} (not echoed): {ConsoleColors.RESET}").strip()
+
+    def _login(self, username: str):
+        from ensta import Web
+        saver = lambda data: self.sessions.save(username, data)
+
+        cached = self.sessions.load(username)
+        if cached:
+            try:
+                return Web(username, "", load=lambda: cached, save=saver)
+            except Exception as e:
+                logging.info(f"Stored session for {username} rejected ({e}), re-authenticating")
+                self.sessions.delete(username)
+                print(f"{ConsoleColors.YELLOW}[!] Saved session expired{ConsoleColors.RESET}")
+
+        password = self._prompt_password(username)
+        if not password:
+            raise ValueError("No password provided")
+        return Web(username, password, load=lambda: "", save=saver)
+
     def _load_excluded_users(self):
         """Load excluded users from config"""
         self.excluded_users = set(CONFIG.get('excluded_users', []))
@@ -167,6 +272,7 @@ class InstagramUnliker:
         """Create necessary directories if they don't exist"""
         try:
             self.accounts_dir.mkdir(exist_ok=True)
+            os.chmod(self.accounts_dir, 0o700)
             self.logs_dir.mkdir(exist_ok=True)
             logging.info("Required directories created successfully")
         except Exception as e:
@@ -189,7 +295,7 @@ class InstagramUnliker:
                           stdout=subprocess.PIPE, 
                           stderr=subprocess.PIPE)
             
-            result = subprocess.run([sys.executable, "-m", "pip", "install", "--no-cache-dir", "ensta==5.2.9"],
+            result = subprocess.run([sys.executable, "-m", "pip", "install", "--no-cache-dir", "ensta==5.2.9", "keyring"],
                                   stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE)
             
@@ -234,23 +340,23 @@ class InstagramUnliker:
         print("-" * 40)
         
         username = input(f"{ConsoleColors.BOLD}Username: {ConsoleColors.RESET}").strip()
-        password = input(f"{ConsoleColors.BOLD}Password: {ConsoleColors.RESET}").strip()
         
-        if not username or not password:
-            print(f"{ConsoleColors.RED}Username and password are required{ConsoleColors.RESET}")
+        if not username:
+            print(f"{ConsoleColors.RED}Username is required{ConsoleColors.RESET}")
             return
         
         self.accounts_dir.mkdir(exist_ok=True)
+        os.chmod(self.accounts_dir, 0o700)
         account_file = self.accounts_dir / f"{username}.json"
         
         if account_file.exists():
             override = input(f"{ConsoleColors.YELLOW}Account exists. Replace? (y/N): {ConsoleColors.RESET}").lower()
             if override != 'y':
                 return
+            self.sessions.delete(username)
         
         account_data = {
             "username": username,
-            "password": password,
             "last_run": None,
             "total_unliked": 0,
             "last_error": None,
@@ -258,8 +364,7 @@ class InstagramUnliker:
         }
         
         try:
-            with open(account_file, 'w') as f:
-                json.dump(account_data, f, indent=4)
+            self._write_account(account_file, account_data)
             
             CONFIG['accounts'][username] = {
                 "enabled": True,
@@ -268,6 +373,7 @@ class InstagramUnliker:
             self.save_config()
             
             print(f"{ConsoleColors.GREEN}✨ Account @{username} added successfully!{ConsoleColors.RESET}")
+            print(f"{ConsoleColors.BLUE}[*] Your password is asked for at first login and never stored{ConsoleColors.RESET}")
         except Exception as e:
             print(f"{ConsoleColors.RED}Could not save account: {str(e)}{ConsoleColors.RESET}")
 
@@ -302,6 +408,8 @@ class InstagramUnliker:
             
             if account_file.exists():
                 account_file.unlink()
+
+            self.sessions.delete(username)
                 
             if username in CONFIG['accounts']:
                 del CONFIG['accounts'][username]
@@ -456,8 +564,7 @@ class InstagramUnliker:
                 print(f"{ConsoleColors.YELLOW}ℹ️  Excluding {len(self.excluded_users)} manually excluded users{ConsoleColors.RESET}")
 
             try:
-                from ensta import Web
-                client = Web(account_data['username'], account_data['password'])
+                client = self._login(account_data['username'])
                 print(f"{ConsoleColors.GREEN}✓ Successfully logged in{ConsoleColors.RESET}")
                 account = client.private_info()
                 print(f"{ConsoleColors.GREEN}Logged in as: {ConsoleColors.CYAN}{account.username}{ConsoleColors.RESET}")
@@ -585,8 +692,7 @@ class InstagramUnliker:
 
             # Update account stats
             account_data['last_run'] = datetime.now().isoformat()
-            with open(account_file, 'w') as f:
-                json.dump(account_data, f, indent=4)
+            self._write_account(account_file, account_data)
 
             print(f"\n{ConsoleColors.GREEN}[✓] Unliking complete for {username}{ConsoleColors.RESET}")
             print(f"{ConsoleColors.BLUE}[*] Reels unliked : {unliked_count}{ConsoleColors.RESET}")
