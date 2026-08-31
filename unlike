@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Launch the unliker using this repo's virtualenv, from any directory.
+# Safe to symlink onto your PATH — the symlink is resolved below.
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    TARGET="$(readlink "$SOURCE")"
+    case "$TARGET" in
+        /*) SOURCE="$TARGET" ;;
+        *)  SOURCE="$(dirname "$SOURCE")/$TARGET" ;;
+    esac
+done
+DIR="$(cd "$(dirname "$SOURCE")" && pwd -P)"
+PY="$DIR/venv/bin/python"
+
+if [ ! -x "$PY" ]; then
+    echo "No virtualenv found at $DIR/venv" >&2
+    echo "Build it with:  cd $DIR && ./run.sh" >&2
+    exit 1
+fi
+
+cd "$DIR"
+exec "$PY" instagram_unliker.py "$@"
