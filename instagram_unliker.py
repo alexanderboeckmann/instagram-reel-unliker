@@ -9,7 +9,7 @@ import logging
 import shutil
 import types
 import importlib.util
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Tuple, Set
 from getpass import getpass
@@ -32,6 +32,7 @@ PROGRESS_DIR = DATA_DIR / "progress"
 EXPORT_SEARCH_DIRS = [Path.home() / "Downloads", Path.home() / "Desktop", BASE_DIR]
 
 LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
+BAR_DESC = "Unliking reels"
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -92,9 +93,16 @@ class ConsoleColors:
     RESET = '\033[0m'
 
 
+_active_bar = None
+
+
+def _emit(line: str):
+    _active_bar.write(line) if _active_bar else print(line)
+
+
 def _status(color: str, glyph: str, msg: str, level: int, blank: bool = False):
     logging.log(level, msg, stacklevel=3)
-    print(f"{chr(10) if blank else ''}{color}{glyph} {msg}{ConsoleColors.RESET}")
+    _emit(f"{chr(10) if blank else ''}{color}{glyph} {msg}{ConsoleColors.RESET}")
 
 
 def ok(msg, blank=False):
@@ -115,8 +123,27 @@ def note(msg, blank=False):
 
 def header(title: str):
     logging.info(f"[{title}]", stacklevel=2)
-    print(f"\n{ConsoleColors.CYAN}{ConsoleColors.BOLD}{title}{ConsoleColors.RESET}")
-    print(f"{ConsoleColors.CYAN}{'─' * 40}{ConsoleColors.RESET}")
+    _emit(f"\n{ConsoleColors.CYAN}{ConsoleColors.BOLD}{title}{ConsoleColors.RESET}")
+    _emit(f"{ConsoleColors.CYAN}{'─' * 40}{ConsoleColors.RESET}")
+
+
+def _reel_code(url: str) -> str:
+    parts = [part for part in url.split('/') if part]
+    return parts[-1] if parts else url
+
+
+def _human_duration(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        m, s = divmod(seconds, 60)
+        return f"{m}m {s}s" if s else f"{m}m"
+    if seconds < 86400:
+        h, m = divmod(seconds // 60, 60)
+        return f"{h}h {m}m" if m else f"{h}h"
+    d, h = divmod(seconds // 3600, 24)
+    return f"{d}d {h}h" if h else f"{d}d"
 
 
 class SessionStore:
@@ -304,6 +331,18 @@ class InstagramUnliker:
             if remaining <= 0:
                 break
             time.sleep(min(0.5, remaining))
+
+    def _wait(self, seconds: float, msg: str):
+        until = (datetime.now() + timedelta(seconds=seconds)).strftime('%H:%M')
+        note(f"{msg} — resuming at {until}")
+        self._sleep(seconds)
+        if self.running:
+            note("Resuming")
+
+    @staticmethod
+    def _next_delay(username: str) -> float:
+        base = random.uniform(CONFIG['delay']['min'], CONFIG['delay']['max'])
+        return base * CONFIG['accounts'].get(username, {}).get('delay_multiplier', 1.0)
         
     def setup_logging(self):
         self.logs_dir.mkdir(exist_ok=True)
@@ -916,6 +955,7 @@ class InstagramUnliker:
             yield post, url, post_username
 
     def unlike_posts(self, username: str):
+        global _active_bar
         account_file = self.accounts_dir / f"{username}.json"
         progress_bar = None
         resume = None
@@ -934,7 +974,7 @@ class InstagramUnliker:
             with open(account_file, 'r', encoding='utf-8') as f:
                 account_data = json.load(f)
 
-            print(f"\n{ConsoleColors.CYAN}Starting to unlike reels for @{username}...{ConsoleColors.RESET}")
+            header(f"Unliking reels for @{username}")
 
             following = self._load_following()
             if following:
@@ -999,11 +1039,21 @@ class InstagramUnliker:
                     print(f"  {ConsoleColors.YELLOW}Excluded users  : {skipped_excluded} (skipped){ConsoleColors.RESET}")
                 if already_done:
                     print(f"  {ConsoleColors.BLUE}Done earlier    : {already_done} (resuming){ConsoleColors.RESET}")
+                logging.info(f"Filter summary: {total_posts} to unlike, {skipped_not_reel} non-reel, "
+                             f"{skipped_following} from following, {skipped_excluded} excluded, "
+                             f"{already_done} done earlier")
 
                 if total_posts == 0:
                     warn("Nothing left to unlike from this export" if already_done
                          else "No reels to unlike after filtering")
                     return
+
+                mean_delay = (CONFIG['delay']['min'] + CONFIG['delay']['max']) / 2
+                mean_break = (CONFIG['break']['min'] + CONFIG['break']['max']) / 2
+                multiplier = CONFIG['accounts'].get(username, {}).get('delay_multiplier', 1.0)
+                per_reel = mean_delay * multiplier + CONFIG['break']['probability'] * mean_break
+                note(f"About {_human_duration(per_reel)} per reel — "
+                     f"{total_posts} reels is roughly {_human_duration(per_reel * total_posts)}")
 
                 unliked_count = 0
                 failed_urls: list = []
@@ -1011,17 +1061,20 @@ class InstagramUnliker:
 
                 progress_bar = tqdm(
                     total=total_posts,
-                    desc="Unliking reels",
+                    desc=BAR_DESC,
+                    file=sys.stdout,
                     bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [ETA: {remaining}]'
                 )
+                _active_bar = progress_bar
+
+                pending = self._next_delay(username)
+                note(f"Starting — first reel in {_human_duration(pending)}")
 
                 for post, url, post_username in reels_only:
                     if not self.running:
                         break
                     try:
-                        base_delay = random.uniform(CONFIG['delay']['min'], CONFIG['delay']['max'])
-                        actual_delay = base_delay * CONFIG['accounts'].get(username, {}).get('delay_multiplier', 1.0)
-                        self._sleep(actual_delay)
+                        self._sleep(pending)
                         if not self.running:
                             break
 
@@ -1032,33 +1085,43 @@ class InstagramUnliker:
                                 client.unlike(media_id)
                                 break
                             except Exception as e:
-                                error_msg = f"Failed to unlike reel (attempt {retry + 1}/{CONFIG['max_retries']}): {str(e)}"
-                                logging.warning(error_msg)
                                 if retry < CONFIG['max_retries'] - 1 and self.running:
+                                    warn(f"Attempt {retry + 1}/{CONFIG['max_retries']} failed: {e} — "
+                                         f"retrying in {_human_duration(CONFIG['retry_delay'])}")
                                     self._sleep(CONFIG['retry_delay'])
                                 else:
-                                    raise Exception(error_msg)
+                                    raise
 
                         unliked_count += 1
                         account_data['total_unliked'] += 1
                         resume.record(url)
                         progress_bar.update(1)
 
+                        pending = self._next_delay(username)
+                        owner = f" · @{post_username}" if post_username else ""
+                        upcoming = f" · next in {_human_duration(pending)}" if unliked_count < total_posts else ""
+                        ok(f"{unliked_count}/{total_posts}{owner}{upcoming}")
+
                         if random.random() < CONFIG['break']['probability']:
                             break_time = random.uniform(CONFIG['break']['min'], CONFIG['break']['max'])
-                            progress_bar.write(f"{ConsoleColors.BLUE}· Taking a break for {break_time/60:.1f} minutes...{ConsoleColors.RESET}")
-                            self._sleep(break_time)
+                            progress_bar.set_description("On a break")
+                            self._wait(break_time, f"Break for {_human_duration(break_time)}")
+                            progress_bar.set_description(BAR_DESC)
 
                     except Exception as e:
-                        error_msg = f"Failed to unlike reel {url}: {str(e)}"
-                        logging.error(error_msg, exc_info=True)
-                        progress_bar.write(f"{ConsoleColors.RED}✗ {error_msg}{ConsoleColors.RESET}")
+                        error_msg = f"Reel {_reel_code(url)} failed: {e}"
+                        fail(error_msg)
+                        if logging.getLogger().isEnabledFor(logging.DEBUG):
+                            logging.debug("Failure detail", exc_info=True)
                         account_data['last_error'] = error_msg
                         failed_urls.append(url)
-                        self._sleep(300)
+                        progress_bar.set_description("Cooling down")
+                        self._wait(300, "Cooling down after that failure")
+                        progress_bar.set_description(BAR_DESC)
 
             finally:
                 self.running = False
+                _active_bar = None
                 if progress_bar is not None:
                     progress_bar.close()
                 if resume is not None:

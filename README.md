@@ -157,7 +157,35 @@ If the `keyring` package or a usable backend is missing, nothing is persisted an
 
 ## Long runs
 
-At the default 20–100 second delay, a large backlog takes **days**, not hours — roughly 80 seconds per reel once the occasional long break is averaged in, so a 5,000-reel backlog runs for about five days. Any failure adds a 5-minute cooldown on top.
+At the default 20–100 second delay, a large backlog takes **days**, not hours — roughly 80 seconds per reel once the occasional long break is averaged in, so a 5,000-reel backlog runs for about five days. Any failure adds a 5-minute cooldown on top. The run prints that estimate up front, from your own `config.json`, before it starts.
+
+Because most of a run is spent waiting, every wait says what it is and when it ends:
+
+```
+Unliking reels for @you
+────────────────────────────────────────
+· Loaded 884 followed accounts — their reels will be skipped
+✓ Logged in as @you
+
+Filter summary:
+  Reels to unlike : 4812
+  Non-reel posts  : 26113 (skipped)
+  From following  : 884 (skipped)
+· About 1m 22s per reel — 4812 reels is roughly 4d 14h
+
+Unliking reels:   1%|▏                | 47/4812 [ETA: 109:11:52]
+✓ 47/4812 · @travelclips · next in 38s
+✓ 48/4812 · @foodreels · next in 1m 12s
+! Attempt 1/3 failed: 429 Too Many Requests — retrying in 1m
+✓ 49/4812 · @dogvids · next in 27s
+· Break for 44m 12s — resuming at 15:12
+· Resuming
+✗ Reel Cx7f2AbCdEf failed: connection reset
+· Cooling down after that failure — resuming at 15:58
+· Resuming
+```
+
+The bar's own ETA is derived from observed rate, so a single long break skews it for a while; the `About … per reel` line is computed from your config and doesn't drift. The bar's label changes to `On a break` or `Cooling down` while it waits, so a stalled bar always says why.
 
 The menu is interactive, so it can't be backgrounded with `nohup`. Use `screen`, which ships with macOS:
 
@@ -170,11 +198,21 @@ Detach with **Ctrl-A** then **D**; reattach with `screen -r unliker`.
 
 Run `caffeinate` *inside* the screen session rather than wrapping it — wrapped, it exits the moment you detach. Keep the machine plugged in with the lid open, since `caffeinate` doesn't prevent clamshell sleep. A dropped network connection is the most common cause of a failed run.
 
-Monitor from another window:
+Monitor from another window. Every line above is written to the log as well, so a detached run has a visible pulse — if the log stops moving, the run is genuinely stuck rather than mid-wait:
 
 ```bash
 tail -f logs/unliker.log
 ```
+
+```
+2026-08-31 11:41:39 [INFO] [instagram_unliker.py:1102] 47/4812 · @travelclips · next in 38s
+2026-08-31 11:42:17 [INFO] [instagram_unliker.py:1102] 48/4812 · @foodreels · next in 1m 12s
+2026-08-31 11:43:29 [WARNING] [instagram_unliker.py:1088] Attempt 1/3 failed: 429 Too Many Requests — retrying in 1m
+2026-08-31 11:44:31 [INFO] [instagram_unliker.py:1102] 49/4812 · @dogvids · next in 27s
+2026-08-31 11:44:58 [INFO] [instagram_unliker.py:337] Break for 44m 12s — resuming at 15:12
+```
+
+Set `log_level` to `WARNING` in `config.json` to keep only problems in the log; the terminal stays as verbose either way.
 
 ## Resuming an interrupted run
 
