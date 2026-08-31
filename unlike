@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Launch the unliker using this repo's virtualenv, from any directory.
-# Safe to symlink onto your PATH — the symlink is resolved below.
+# Sets up on first run, then launches the unliker. Safe to symlink onto your PATH.
 set -euo pipefail
 
 SOURCE="${BASH_SOURCE[0]}"
@@ -12,13 +11,38 @@ while [ -L "$SOURCE" ]; do
     esac
 done
 DIR="$(cd "$(dirname "$SOURCE")" && pwd -P)"
-PY="$DIR/venv/bin/python"
+cd "$DIR"
 
-if [ ! -x "$PY" ]; then
-    echo "No virtualenv found at $DIR/venv" >&2
-    echo "Build it with:  cd $DIR && ./run.sh" >&2
-    exit 1
+PY="venv/bin/python"
+STAMP="venv/.requirements"
+
+setup() {
+    echo "Setting up (one time)..."
+
+    command -v python3 >/dev/null || {
+        echo "python3 not found. Install it and re-run." >&2
+        exit 1
+    }
+    python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' || {
+        echo "Python 3.10 or newer required." >&2
+        exit 1
+    }
+
+    [ -x "$PY" ] || { rm -rf venv; python3 -m venv venv; }
+
+    "$PY" -m pip install --quiet --upgrade pip
+    "$PY" -m pip install --quiet --no-cache-dir -r requirements.txt
+
+    # ensta imports these at module scope but never reaches them here; the app stubs them out.
+    "$PY" -m pip uninstall -y -q moviepy imageio imageio-ffmpeg numpy pillow pyquery lxml \
+        proglog python-dotenv decorator cssselect
+
+    cp requirements.txt "$STAMP"
+    echo
+}
+
+if [ ! -x "$PY" ] || ! cmp -s requirements.txt "$STAMP"; then
+    setup
 fi
 
-cd "$DIR"
 exec "$PY" instagram_unliker.py "$@"

@@ -7,9 +7,6 @@ accounts/
 # Runtime config (created on first launch from the defaults in instagram_unliker.py)
 config.json
 
-# legacy ensta login session (now stored in the Keychain)
-ensta-session.json
-
 # Runtime
 logs/
 *.bak

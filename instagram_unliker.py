@@ -343,32 +343,8 @@ class InstagramUnliker:
         self.check_and_create_config()
         self._apply_log_level()
         self._load_excluded_users()
-        self._migrate_credentials()
-        
-    def _migrate_credentials(self):
-        legacy = BASE_DIR / "ensta-session.json"
-        if legacy.exists():
-            try:
-                data = json.loads(legacy.read_text(encoding='utf-8'))
-                owner = data.get('identifier') or data.get('username')
-                if owner and self.sessions.save(owner, json.dumps(data)):
-                    ok(f"Moved @{owner}'s login session into the Keychain")
-                legacy.unlink()
-            except Exception as e:
-                logging.warning(f"Could not migrate {legacy}: {e}")
-
-        for account_file in sorted(self.accounts_dir.glob("*.json")):
-            try:
-                data = json.loads(account_file.read_text(encoding='utf-8'))
-            except Exception:
-                continue
-            if data.pop('password', None) is not None:
-                username = data.get('username', account_file.stem)
-                self._write_account(account_file, data)
-                ok(f"Removed @{username}'s stored password from {account_file}")
 
     def _write_account(self, account_file: Path, data: dict):
-        data.pop('password', None)
         tmp = account_file.with_name(account_file.name + '.tmp')
         with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=4)
