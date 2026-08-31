@@ -38,7 +38,34 @@ setup() {
         proglog python-dotenv decorator cssselect
 
     cp requirements.txt "$STAMP"
+    link_onto_path
     echo
+}
+
+# Put `unlike` on the PATH so it works from any directory, without asking anyone to.
+link_onto_path() {
+    local dest="" target d
+    for d in "$HOME/.local/bin" /usr/local/bin; do
+        case ":$PATH:" in *":$d:"*) [ -w "$d" ] && { dest="$d"; break; } ;; esac
+    done
+    [ -n "$dest" ] || { dest="$HOME/.local/bin"; mkdir -p "$dest" 2>/dev/null || return 0; }
+
+    target="$dest/unlike"
+    if [ -L "$target" ] && [ "$(readlink "$target")" = "$DIR/unlike" ]; then
+        :
+    elif [ -e "$target" ] || [ -L "$target" ]; then
+        echo "Note: $target already exists and is not this repo — leaving it alone."
+        echo "      Run this one as ./unlike, or link it yourself."
+        return 0
+    else
+        ln -s "$DIR/unlike" "$target" || return 0
+    fi
+
+    case ":$PATH:" in
+        *":$dest:"*) echo "Installed: you can now run 'unlike' from anywhere." ;;
+        *) echo "Linked into $dest, which is not on your PATH. Add this to your shell profile:"
+           echo "      export PATH=\"$dest:\$PATH\"" ;;
+    esac
 }
 
 if [ ! -x "$PY" ] || ! cmp -s requirements.txt "$STAMP"; then

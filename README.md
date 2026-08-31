@@ -18,21 +18,19 @@ It doesn't scrape your likes from the UI. It reads your official Instagram data 
 
 **1. Request your data export.** Instagram → Settings → **Accounts Center** → Your information and permissions → **Download your information**. Request it in **JSON** format (HTML can't be read). The ZIP arrives by email in 15–60 minutes. Leave it in `~/Downloads` — the importer finds it.
 
-**2. Run it.**
+**2. Run it.** From the folder you cloned into:
 
 ```bash
 ./unlike
 ```
 
-First run builds a virtualenv and installs dependencies, then opens the menu. Every run after that goes straight to the menu. Needs Python 3.10+.
-
-To call it from anywhere, symlink it — the launcher resolves the symlink back to the repo:
+That first run installs everything (needs Python 3.10+) and puts `unlike` on your PATH, so from then on it's just:
 
 ```bash
-ln -s "$PWD/unlike" ~/.local/bin/unlike
+unlike
 ```
 
-Tested on macOS; Linux should work but is untested. Windows is not supported.
+from any directory. Tested on macOS; Linux should work but is untested. Windows is not supported.
 
 ## Using it
 
@@ -84,14 +82,22 @@ Filter summary:
 · Break for 44m 12s — resuming at 15:12
 ```
 
-The menu is interactive, so use `screen` rather than `nohup`:
+Because a run takes days, you need it to survive closing the terminal window and your Mac going to sleep. Two built-in commands handle that:
 
 ```bash
-screen -S unliker
-caffeinate -is ./unlike
+screen -S unliker          # start a session that keeps running after you close the window
+caffeinate -is unlike      # inside it: run the unliker, keeping the Mac awake
 ```
 
-Detach with **Ctrl-A** then **D**, reattach with `screen -r unliker`. Run `caffeinate` *inside* the session — wrapped around it, it exits when you detach. Keep the machine plugged in with the lid open. Follow along from another window with `tail -f logs/unliker.log`.
+Press **Ctrl-A** then **D** to leave it running in the background and get your terminal back. Come back to it any time with `screen -r unliker`.
+
+Two things that catch people out: type `caffeinate -is unlike` *inside* the screen session, not `screen ... caffeinate ...` from outside — done the other way it stops keeping the Mac awake the moment you detach. And `caffeinate` can't stop a closed lid from sleeping, so leave the laptop plugged in and open.
+
+To check on a detached run without reattaching, watch the log from any window — the same lines appear there:
+
+```bash
+tail -f ~/instagram-reel-unliker/logs/unliker.log
+```
 
 **Resuming is automatic.** Each item is flushed to `data/progress/<username>.txt` as it's unliked, so an interrupted run — Ctrl-C, dropped connection, crash, `kill -9` — loses at most the one in flight, and the next run skips what's done. Failed items aren't recorded, so they come back around. Delete the file to start over. Importing a different export discards it automatically.
 
