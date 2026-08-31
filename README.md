@@ -1,4 +1,4 @@
-# 📱 Instagram Reel Unliker
+# Instagram Reel Unliker
 
 > Bulk-unlike Instagram reels, skipping accounts you follow. Free, open-source, runs entirely on your own machine.
 
@@ -17,23 +17,25 @@ A fork of [TahaGorme/InstaMassUnliker](https://github.com/TahaGorme/InstaMassUnl
 
 Plus a manual exclude list on top of that, for accounts you don't follow but still want left untouched.
 
-## 📑 Table of Contents
-- [How it works](#-how-it-works)
-- [Setup](#-setup)
-- [Running it](#-running-it)
-- [Long runs](#-long-runs)
-- [Configuration](#-configuration)
-- [Known limitations](#-known-limitations)
-- [License](#-license)
-- [Disclaimer](#%EF%B8%8F-disclaimer)
+## Table of Contents
+- [How it works](#how-it-works)
+- [Setup](#setup)
+- [Importing your export](#importing-your-export)
+- [Running it](#running-it)
+- [Where your credentials live](#where-your-credentials-live)
+- [Long runs](#long-runs)
+- [Configuration](#configuration)
+- [Known limitations](#known-limitations)
+- [License](#license)
+- [Disclaimer](#disclaimer)
 
-## 🔍 How it works
+## How it works
 
 This tool does **not** scrape your likes from the Instagram UI. It reads your official Instagram data export, filters it, and then calls Instagram's unlike endpoint once per reel via [`ensta`](https://pypi.org/project/ensta/).
 
 That means the export is the source of truth, and it has a useful property: it's a snapshot of what you *currently* like. Request a fresh export and everything you've already unliked simply drops out of the list.
 
-## 🚀 Setup
+## Setup
 
 ### 1. Request your Instagram data export
 
@@ -41,7 +43,7 @@ That means the export is the source of truth, and it has a useful property: it's
 2. Request a download, **format: JSON** (HTML exports cannot be read by this tool)
 3. Instagram emails you a ZIP, usually within 15–60 minutes
 
-That's it — you don't have to unpack it or move anything by hand. See [Importing your export](#-importing-your-export) below.
+That's it — you don't have to unpack it or move anything by hand. See [Importing your export](#importing-your-export) below.
 
 ### 2. Install
 
@@ -60,7 +62,7 @@ If `venv/` already exists but is broken — for example it points at a Python th
 rm -rf venv && ./run.sh
 ```
 
-## 📦 Importing your export
+## Importing your export
 
 Pick **Import Instagram Data** from the menu. It scans `~/Downloads` and `~/Desktop` for anything that looks like an Instagram export and offers it as a list, so most of the time it's one keystroke:
 
@@ -89,7 +91,7 @@ A folder, the untouched `.zip`, or a single `liked_posts.json` / `following.json
 
 Once the copy is made it offers to delete the original export (they run ~100 MB), and *Start Unliking* prompts you to import first if you haven't — before asking for a password, not after.
 
-## ▶️ Running it
+## Running it
 
 After the first setup, use the launcher:
 
@@ -132,7 +134,7 @@ Add your account with **1** — username only, no password. Import your export w
 
 If you change your Instagram password, nothing needs re-adding: the old session stops working and you are prompted for the new password on the next run.
 
-## 🔐 Where your credentials live
+## Where your credentials live
 
 Your Instagram password is **never written to disk and never stored anywhere** — not in a file, not in the keychain. It is typed at the prompt (not echoed), used once to obtain a login session, and dropped.
 
@@ -153,7 +155,7 @@ Removing an account with menu option **2** deletes its keychain session too.
 
 If the `keyring` package or a usable backend is missing, nothing is persisted and you are asked for your password on every run.
 
-## ⏳ Long runs
+## Long runs
 
 At the default 5–15 second delay, a large backlog takes **days**, not hours — roughly 10 seconds per reel, plus a 5-minute cooldown after any failure.
 
@@ -174,7 +176,7 @@ Monitor from another window:
 tail -f logs/unliker.log
 ```
 
-## 🌐 Configuration
+## Configuration
 
 `config.json`:
 
@@ -199,7 +201,7 @@ tail -f logs/unliker.log
 - **`delay_multiplier`** — per-account scaling of the delay.
 - **`excluded_users`** — usernames never touched, on top of the automatic follow-filter. Edit via menu option **4**.
 
-## ⚠️ Known limitations
+## Known limitations
 
 - **No resume state.** `data/liked_posts.json` is never rewritten, so an interrupted run restarts from the top of the list on the next launch. Re-unliking an already-unliked reel is harmless but wastes the whole queue. A fresh export is the fastest way to resume.
 - **The stored session is readable by code running as you.** Keychain items this app writes are readable without a prompt by anything running under your user account. This protects against accidental commits, backups, cloud sync, and offline disk access — not against malware already running as you.
@@ -209,10 +211,10 @@ tail -f logs/unliker.log
 - **FFmpeg is not installed** by `run.sh`. It isn't needed for unliking; `moviepy` is only pulled in as an `ensta` dependency.
 - **`moviepy<2.0` in `requirements.txt` is a load-bearing pin, not cruft.** `ensta` 5.2.9 does `import moviepy.editor`, a module removed in moviepy 2.0. Unpinning it makes `import ensta` fail outright.
 
-## 📄 License
+## License
 
 MIT — see [LICENSE](LICENSE). Original work by [TahaGorme](https://github.com/TahaGorme/InstaMassUnliker).
 
-## ⚠️ Disclaimer
+## Disclaimer
 
 For educational purposes and for managing your own account. Automating actions is contrary to Instagram's Terms of Use and may result in rate limiting, action blocks, or account suspension. Use it on your own account, at your own risk.
