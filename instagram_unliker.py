@@ -33,10 +33,12 @@ IMPORT_META_PATH = DATA_DIR / "import_meta.json"
 REQUIREMENTS_PATH = BASE_DIR / "requirements.txt"
 EXPORT_SEARCH_DIRS = [Path.home() / "Downloads", Path.home() / "Desktop", BASE_DIR]
 
+LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    datefmt=LOG_DATEFMT
 )
 
 CONFIG = {
@@ -123,19 +125,19 @@ class SessionStore:
 
 class InstagramUnliker: 
     def __init__(self):
-        logging.info("Starting Instagram Unliker application...")
-        
         self.config_file = BASE_DIR / "config.json"
         self.accounts_dir = BASE_DIR / "accounts"
         self.logs_dir = BASE_DIR / "logs"
         self.running = True
         self.excluded_users: Set[str] = set()
+
+        self.setup_logging()
+        logging.info("Starting Instagram Unliker application...")
         self.sessions = SessionStore()
-        
+
         self._create_required_directories()
         self._ensure_python_environment()
         self._setup_signal_handlers()
-        self.setup_logging()
         self.check_and_create_config()
         self._load_excluded_users()
         self._migrate_credentials()
@@ -239,27 +241,26 @@ class InstagramUnliker:
             encoding='utf-8'
         )
         
-        file_formatter = logging.Formatter(
+        file_handler.setFormatter(logging.Formatter(
             '%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        console_formatter = logging.Formatter(
-            '%(asctime)s [%(levelname)s] %(message)s',
-            datefmt='%H:%M:%S'
-        )
-        
-        file_handler.setFormatter(file_formatter)
+            datefmt=LOG_DATEFMT
+        ))
+        file_handler.setLevel(logging.INFO)
+
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(console_formatter)
-        
+        console_handler.setFormatter(logging.Formatter(
+            '%(asctime)s [%(levelname)s] %(message)s',
+            datefmt=LOG_DATEFMT
+        ))
+        console_handler.setLevel(logging.WARNING)
+
         root_logger = logging.getLogger()
         root_logger.setLevel(logging.INFO)
         root_logger.handlers.clear()
         root_logger.addHandler(file_handler)
         root_logger.addHandler(console_handler)
-        
+
         atexit.register(self._cleanup_logs)
-        logging.info("Logging system initialized")
         
     def _cleanup_logs(self):
         try:
@@ -276,7 +277,7 @@ class InstagramUnliker:
             os.chmod(self.accounts_dir, 0o700)
             self.logs_dir.mkdir(exist_ok=True)
             DATA_DIR.mkdir(exist_ok=True)
-            logging.info("Required directories created successfully")
+            logging.info("Data directories ready")
         except Exception as e:
             logging.error(f"Failed to create directories: {str(e)}")
             print("Please ensure you have write permissions in the current directory")
@@ -286,7 +287,7 @@ class InstagramUnliker:
         if version.major < 3 or (version.major == 3 and version.minor < 7):
             print(f"{ConsoleColors.RED}[✗] Error: Python 3.7 or higher required (current: {version.major}.{version.minor}){ConsoleColors.RESET}")
             return False
-        print(f"{ConsoleColors.GREEN}[✓] Python version check passed ({version.major}.{version.minor}){ConsoleColors.RESET}")
+        logging.info(f"Python {version.major}.{version.minor}")
         return True
 
     def install_requirements(self) -> bool:
@@ -322,7 +323,7 @@ class InstagramUnliker:
                     for key, value in loaded_config.items():
                         if key in CONFIG:
                             CONFIG[key] = value
-                print(f"{ConsoleColors.GREEN}[✓] Loaded existing configuration{ConsoleColors.RESET}")
+                logging.info("Loaded existing configuration")
             except json.JSONDecodeError:
                 print(f"{ConsoleColors.RED}[✗] Error: Corrupted configuration file{ConsoleColors.RESET}")
                 backup_file = f"{self.config_file}.bak"
@@ -1265,9 +1266,6 @@ def parse_args():
 def main():
     try:
         args = parse_args()
-        print("\nWelcome to Instagram Mass Unliker!")
-        print("Checking system requirements...")
-        
         unliker = InstagramUnliker()
         if not unliker.check_dependencies():
             print("Error: Failed to install required dependencies.")
@@ -1281,8 +1279,6 @@ def main():
         
         if not unliker.check_python_version():
             sys.exit(1)
-        
-        unliker.check_and_create_config()
 
         if args.import_path:
             unliker.import_export(InstagramUnliker._resolve_dropped_path(args.import_path))
