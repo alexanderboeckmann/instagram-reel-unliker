@@ -75,6 +75,31 @@ class ConsoleColors:
     RESET = '\033[0m'
 
 
+def _status(color: str, glyph: str, msg: str, blank: bool = False):
+    print(f"{chr(10) if blank else ''}{color}{glyph} {msg}{ConsoleColors.RESET}")
+
+
+def ok(msg, blank=False):
+    _status(ConsoleColors.GREEN, "✓", msg, blank)
+
+
+def warn(msg, blank=False):
+    _status(ConsoleColors.YELLOW, "!", msg, blank)
+
+
+def fail(msg, blank=False):
+    _status(ConsoleColors.RED, "✗", msg, blank)
+
+
+def note(msg, blank=False):
+    _status(ConsoleColors.BLUE, "·", msg, blank)
+
+
+def header(title: str):
+    print(f"\n{ConsoleColors.CYAN}{ConsoleColors.BOLD}{title}{ConsoleColors.RESET}")
+    print(f"{ConsoleColors.CYAN}{'─' * 40}{ConsoleColors.RESET}")
+
+
 class SessionStore:
     SERVICE = "instagram-reel-unliker-session"
 
@@ -134,6 +159,8 @@ class InstagramUnliker:
         self.setup_logging()
         logging.info("Starting Instagram Unliker application...")
         self.sessions = SessionStore()
+        if not self.sessions.available:
+            warn("No keychain available — you will be asked for your password every run")
 
         self._create_required_directories()
         self._ensure_python_environment()
@@ -149,7 +176,7 @@ class InstagramUnliker:
                 data = json.loads(legacy.read_text(encoding='utf-8'))
                 owner = data.get('identifier') or data.get('username')
                 if owner and self.sessions.save(owner, json.dumps(data)):
-                    print(f"{ConsoleColors.GREEN}[✓] Moved @{owner}'s login session into the Keychain{ConsoleColors.RESET}")
+                    ok(f"Moved @{owner}'s login session into the Keychain")
                     logging.info(f"Migrated session for {owner} into the Keychain")
                 legacy.unlink()
             except Exception as e:
@@ -163,7 +190,7 @@ class InstagramUnliker:
             if data.pop('password', None) is not None:
                 username = data.get('username', account_file.stem)
                 self._write_account(account_file, data)
-                print(f"{ConsoleColors.GREEN}[✓] Removed @{username}'s stored password from {account_file}{ConsoleColors.RESET}")
+                ok(f"Removed @{username}'s stored password from {account_file}")
                 logging.info(f"Stripped stored password for {username}")
 
     def _write_account(self, account_file: Path, data: dict):
@@ -189,7 +216,7 @@ class InstagramUnliker:
             except Exception as e:
                 logging.info(f"Stored session for {username} rejected ({e}), re-authenticating")
                 self.sessions.delete(username)
-                print(f"{ConsoleColors.YELLOW}[!] Saved session expired{ConsoleColors.RESET}")
+                warn("Saved session expired")
 
         password = self._prompt_password(username)
         if not password:
@@ -225,7 +252,7 @@ class InstagramUnliker:
         signal.signal(signal.SIGTERM, self._handle_shutdown)
         
     def _handle_shutdown(self, signum, frame):
-        print(f"\n{ConsoleColors.YELLOW}[!] Received shutdown signal. Cleaning up...{ConsoleColors.RESET}")
+        warn("Received shutdown signal. Cleaning up...", blank=True)
         self.running = False
         time.sleep(1)
         sys.exit(0)
@@ -247,18 +274,10 @@ class InstagramUnliker:
         ))
         file_handler.setLevel(logging.INFO)
 
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(logging.Formatter(
-            '%(asctime)s [%(levelname)s] %(message)s',
-            datefmt=LOG_DATEFMT
-        ))
-        console_handler.setLevel(logging.WARNING)
-
         root_logger = logging.getLogger()
         root_logger.setLevel(logging.INFO)
         root_logger.handlers.clear()
         root_logger.addHandler(file_handler)
-        root_logger.addHandler(console_handler)
 
         atexit.register(self._cleanup_logs)
         
@@ -285,7 +304,7 @@ class InstagramUnliker:
     def check_python_version(self) -> bool:
         version = sys.version_info
         if version.major < 3 or (version.major == 3 and version.minor < 7):
-            print(f"{ConsoleColors.RED}[✗] Error: Python 3.7 or higher required (current: {version.major}.{version.minor}){ConsoleColors.RESET}")
+            fail(f"Error: Python 3.7 or higher required (current: {version.major}.{version.minor})")
             return False
         logging.info(f"Python {version.major}.{version.minor}")
         return True
@@ -299,23 +318,23 @@ class InstagramUnliker:
 
             if result.returncode != 0:
                 logging.error(f"Failed to install dependencies: {result.stderr.decode()}")
-                print(f"{ConsoleColors.RED}[✗] Failed to install dependencies. Error: {result.stderr.decode()}{ConsoleColors.RESET}")
+                fail(f"Failed to install dependencies. Error: {result.stderr.decode()}")
                 return False
 
             logging.info("Successfully installed dependencies")
-            print(f"{ConsoleColors.GREEN}[✓] Successfully installed dependencies{ConsoleColors.RESET}")
+            ok("Successfully installed dependencies")
             return True
             
         except Exception as e:
             logging.error(f"Error during package installation: {str(e)}")
-            print(f"{ConsoleColors.RED}[✗] Installation error: {str(e)}{ConsoleColors.RESET}")
+            fail(f"Installation error: {str(e)}")
             return False
 
     def check_and_create_config(self):
         if not os.path.exists(self.config_file):
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(CONFIG, f, indent=4)
-            print(f"{ConsoleColors.GREEN}[✓] Created default configuration file{ConsoleColors.RESET}")
+            ok("Created default configuration file")
         else:
             try:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
@@ -325,20 +344,19 @@ class InstagramUnliker:
                             CONFIG[key] = value
                 logging.info("Loaded existing configuration")
             except json.JSONDecodeError:
-                print(f"{ConsoleColors.RED}[✗] Error: Corrupted configuration file{ConsoleColors.RESET}")
+                fail("Error: Corrupted configuration file")
                 backup_file = f"{self.config_file}.bak"
                 os.rename(self.config_file, backup_file)
-                print(f"{ConsoleColors.YELLOW}[!] Backed up corrupted config to {backup_file}{ConsoleColors.RESET}")
+                warn(f"Backed up corrupted config to {backup_file}")
                 self.check_and_create_config()
 
     def add_account(self):
-        print(f"\n{ConsoleColors.CYAN}➕ Add Instagram Account{ConsoleColors.RESET}")
-        print("-" * 40)
+        header("Add Instagram Account")
         
         username = input(f"{ConsoleColors.BOLD}Username: {ConsoleColors.RESET}").strip()
         
         if not username:
-            print(f"{ConsoleColors.RED}Username is required{ConsoleColors.RESET}")
+            fail("Username is required")
             return
         
         self.accounts_dir.mkdir(exist_ok=True)
@@ -367,19 +385,18 @@ class InstagramUnliker:
             }
             self.save_config()
             
-            print(f"{ConsoleColors.GREEN}✨ Account @{username} added successfully!{ConsoleColors.RESET}")
-            print(f"{ConsoleColors.BLUE}[*] Your password is asked for at first login and never stored{ConsoleColors.RESET}")
+            ok(f"Account @{username} added")
+            note("Your password is asked for at first login and never stored")
         except Exception as e:
-            print(f"{ConsoleColors.RED}Could not save account: {str(e)}{ConsoleColors.RESET}")
+            fail(f"Could not save account: {e}")
 
     def remove_account(self):
         accounts = self.list_accounts()
         if not accounts:
-            print(f"{ConsoleColors.YELLOW}[!] No accounts configured{ConsoleColors.RESET}")
+            warn("No accounts configured")
             return
             
-        print(f"\n{ConsoleColors.BLUE}[×] Remove Account{ConsoleColors.RESET}")
-        print("-" * 30)
+        header("Remove Account")
         for i, acc in enumerate(accounts, 1):
             print(f"{i}. {acc}")
             
@@ -390,13 +407,13 @@ class InstagramUnliker:
                 
             choice = int(choice)
             if choice < 1 or choice > len(accounts):
-                print(f"{ConsoleColors.RED}[✗] Invalid selection{ConsoleColors.RESET}")
+                fail("Invalid selection")
                 return
                 
             username = accounts[choice - 1]
             account_file = self.accounts_dir / f"{username}.json"
             
-            confirm = input(f"{ConsoleColors.YELLOW}[!] Are you sure you want to remove {username}? (y/N): {ConsoleColors.RESET}").lower()
+            confirm = input(f"{ConsoleColors.YELLOW}! Are you sure you want to remove {username}? (y/N): {ConsoleColors.RESET}").lower()
             if confirm != 'y':
                 return
             
@@ -409,15 +426,14 @@ class InstagramUnliker:
                 del CONFIG['accounts'][username]
                 self.save_config()
                 
-            print(f"{ConsoleColors.GREEN}[✓] Account {username} removed successfully{ConsoleColors.RESET}")
+            ok(f"Account {username} removed successfully")
             
         except Exception as e:
-            print(f"{ConsoleColors.RED}[✗] Error: {str(e)}{ConsoleColors.RESET}")
+            fail(f"Error: {str(e)}")
 
     def manage_excluded_users(self):
         while True:
-            print(f"\n{ConsoleColors.CYAN}🚫 Manage Excluded Users{ConsoleColors.RESET}")
-            print("=" * 50)
+            header("Manage Excluded Users")
             
             if self.excluded_users:
                 print(f"\n{ConsoleColors.YELLOW}Currently Excluded ({len(self.excluded_users)} users):{ConsoleColors.RESET}")
@@ -440,11 +456,11 @@ class InstagramUnliker:
                     self.excluded_users.add(username)
                     CONFIG['excluded_users'] = list(self.excluded_users)
                     self.save_config()
-                    print(f"{ConsoleColors.GREEN}✓ Added @{username} to exclude list{ConsoleColors.RESET}")
+                    ok(f"Added @{username} to exclude list")
                     
             elif choice == "2":
                 if not self.excluded_users:
-                    print(f"{ConsoleColors.YELLOW}No users to remove{ConsoleColors.RESET}")
+                    warn("No users to remove")
                     continue
                     
                 username = input(f"{ConsoleColors.BOLD}Enter username to remove: {ConsoleColors.RESET}").strip().lower()
@@ -452,9 +468,9 @@ class InstagramUnliker:
                     self.excluded_users.remove(username)
                     CONFIG['excluded_users'] = list(self.excluded_users)
                     self.save_config()
-                    print(f"{ConsoleColors.GREEN}✓ Removed @{username} from exclude list{ConsoleColors.RESET}")
+                    ok(f"Removed @{username} from exclude list")
                 else:
-                    print(f"{ConsoleColors.YELLOW}User not found in exclude list{ConsoleColors.RESET}")
+                    warn("User not found in exclude list")
                     
             elif choice == "3":
                 if self.excluded_users:
@@ -463,12 +479,12 @@ class InstagramUnliker:
                         self.excluded_users.clear()
                         CONFIG['excluded_users'] = []
                         self.save_config()
-                        print(f"{ConsoleColors.GREEN}✓ Cleared all excluded users{ConsoleColors.RESET}")
+                        ok("Cleared all excluded users")
                         
             elif choice == "0":
                 break
             else:
-                print(f"{ConsoleColors.RED}Invalid option{ConsoleColors.RESET}")
+                fail("Invalid option")
             
             time.sleep(1)
 
@@ -482,7 +498,7 @@ class InstagramUnliker:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(CONFIG, f, indent=4)
         except Exception as e:
-            print(f"{ConsoleColors.RED}[✗] Failed to save configuration: {str(e)}{ConsoleColors.RESET}")
+            fail(f"Failed to save configuration: {str(e)}")
 
     @staticmethod
     def _resolve_dropped_path(raw: str) -> Optional[Path]:
@@ -671,6 +687,18 @@ class InstagramUnliker:
         return len([e for e in data['relationships_following'] if e.get('title')])
 
     @staticmethod
+    def _imported_phrase(stamp: Optional[str]) -> str:
+        try:
+            days = (datetime.now().date() - datetime.strptime(stamp, '%Y-%m-%d').date()).days
+        except (TypeError, ValueError):
+            return "imported ?"
+        if days <= 0:
+            return "imported today"
+        if days == 1:
+            return "imported yesterday"
+        return f"imported {stamp} ({days} days ago)"
+
+    @staticmethod
     def _read_import_meta() -> Optional[dict]:
         try:
             return json.loads(IMPORT_META_PATH.read_text(encoding='utf-8'))
@@ -700,10 +728,10 @@ class InstagramUnliker:
                 try:
                     return candidates[int(choice) - 1]
                 except (ValueError, IndexError):
-                    print(f"{ConsoleColors.RED}Invalid choice{ConsoleColors.RESET}")
+                    fail("Invalid choice")
                     return None
         else:
-            print(f"\n{ConsoleColors.YELLOW}No Instagram export found in Downloads or Desktop.{ConsoleColors.RESET}")
+            warn("No Instagram export found in Downloads or Desktop.", blank=True)
 
         print(f"\n{ConsoleColors.CYAN}Drag the unzipped export folder (or its .zip) from Finder "
               f"into this window, then press Enter.{ConsoleColors.RESET}")
@@ -733,15 +761,15 @@ class InstagramUnliker:
                 shutil.rmtree(source)
             else:
                 source.unlink()
-            print(f"{ConsoleColors.GREEN}✓ Deleted {source}{ConsoleColors.RESET}")
+            ok(f"Deleted {source}")
         except OSError as e:
-            print(f"{ConsoleColors.RED}[✗] Could not delete it: {e}{ConsoleColors.RESET}")
+            fail(f"Could not delete it: {e}")
 
     def import_export(self, source: Optional[Path] = None) -> bool:
         if source is None:
             source = self._prompt_for_source()
         if source is None:
-            print(f"{ConsoleColors.YELLOW}Import cancelled{ConsoleColors.RESET}")
+            warn("Import cancelled")
             return False
 
         try:
@@ -760,11 +788,11 @@ class InstagramUnliker:
                 if following_src:
                     shutil.copy2(following_src, FOLLOWING_PATH)
         except (ValueError, zipfile.BadZipFile, OSError) as e:
-            print(f"\n{ConsoleColors.RED}[✗] {e}{ConsoleColors.RESET}")
+            fail(f"{e}", blank=True)
             logging.error(f"Import failed for {source}: {e}")
             return False
 
-        print(f"\n{ConsoleColors.GREEN}✓ Imported from {source.name}{ConsoleColors.RESET}")
+        ok(f"Imported from {source.name}", blank=True)
         if liked_src:
             print(f"  {ConsoleColors.WHITE}Liked posts   : {liked_total:,}{ConsoleColors.RESET}")
             print(f"  {ConsoleColors.WHITE}Reels among them: {liked_reels:,}{ConsoleColors.RESET}")
@@ -830,11 +858,11 @@ class InstagramUnliker:
         if not account_file.exists():
             error_msg = f"Account file not found for {username}"
             logging.error(error_msg)
-            print(f"\n{ConsoleColors.RED}[✗] {error_msg}. Please add it first.{ConsoleColors.RESET}")
+            fail(f"{error_msg}. Please add it first.", blank=True)
             return
 
         if not LIKED_POSTS_PATH.exists():
-            print(f"\n{ConsoleColors.YELLOW}[!] No Instagram export imported yet.{ConsoleColors.RESET}")
+            warn("No Instagram export imported yet.", blank=True)
             if not self.import_export():
                 return
 
@@ -846,20 +874,19 @@ class InstagramUnliker:
 
             following = self._load_following()
             if following:
-                print(f"{ConsoleColors.BLUE}ℹ️  Loaded {len(following)} followed accounts — their reels will be skipped{ConsoleColors.RESET}")
+                note(f"Loaded {len(following)} followed accounts — their reels will be skipped")
 
             if self.excluded_users:
-                print(f"{ConsoleColors.YELLOW}ℹ️  Excluding {len(self.excluded_users)} manually excluded users{ConsoleColors.RESET}")
+                note(f"Excluding {len(self.excluded_users)} manually excluded users")
 
             try:
                 client = self._login(account_data['username'])
-                print(f"{ConsoleColors.GREEN}✓ Successfully logged in{ConsoleColors.RESET}")
                 account = client.private_info()
-                print(f"{ConsoleColors.GREEN}Logged in as: {ConsoleColors.CYAN}{account.username}{ConsoleColors.RESET}")
+                ok(f"Logged in as @{account.username}")
             except Exception as e:
                 error_msg = f"Login failed: {str(e)}"
                 logging.error(error_msg)
-                print(f"{ConsoleColors.RED}[✗] {error_msg}")
+                fail(error_msg)
                 print(f"→ Please check your username and password.{ConsoleColors.RESET}")
                 return
 
@@ -871,7 +898,7 @@ class InstagramUnliker:
                     raw_posts = raw_posts.get('likes_media_likes', [])
 
                 if not raw_posts:
-                    print(f"{ConsoleColors.YELLOW}[!] No liked posts found in liked_posts.json{ConsoleColors.RESET}")
+                    warn("No liked posts found in liked_posts.json")
                     return
 
                 reels_only: list = []
@@ -908,7 +935,7 @@ class InstagramUnliker:
                     print(f"  {ConsoleColors.YELLOW}Excluded users  : {skipped_excluded} (skipped){ConsoleColors.RESET}")
 
                 if total_posts == 0:
-                    print(f"{ConsoleColors.YELLOW}No reels to unlike after filtering{ConsoleColors.RESET}")
+                    warn("No reels to unlike after filtering")
                     return
 
                 unliked_count = 0
@@ -948,13 +975,13 @@ class InstagramUnliker:
 
                         if random.random() < CONFIG['break']['probability']:
                             break_time = random.uniform(CONFIG['break']['min'], CONFIG['break']['max'])
-                            progress_bar.write(f"{ConsoleColors.BLUE}[*] Taking a break for {break_time/60:.1f} minutes...{ConsoleColors.RESET}")
+                            progress_bar.write(f"{ConsoleColors.BLUE}· Taking a break for {break_time/60:.1f} minutes...{ConsoleColors.RESET}")
                             time.sleep(break_time)
 
                     except Exception as e:
                         error_msg = f"Failed to unlike reel {url}: {str(e)}"
                         logging.error(error_msg, exc_info=True)
-                        progress_bar.write(f"{ConsoleColors.RED}[✗] {error_msg}{ConsoleColors.RESET}")
+                        progress_bar.write(f"{ConsoleColors.RED}✗ {error_msg}{ConsoleColors.RESET}")
                         account_data['last_error'] = error_msg
                         failed_urls.append(url)
                         time.sleep(300)
@@ -966,19 +993,19 @@ class InstagramUnliker:
             account_data['last_run'] = datetime.now().isoformat()
             self._write_account(account_file, account_data)
 
-            print(f"\n{ConsoleColors.GREEN}[✓] Unliking complete for {username}{ConsoleColors.RESET}")
-            print(f"{ConsoleColors.BLUE}[*] Reels unliked : {unliked_count}{ConsoleColors.RESET}")
+            ok(f"Unliking complete for {username}", blank=True)
+            note(f"Reels unliked : {unliked_count}")
             if failed_urls:
-                print(f"{ConsoleColors.RED}[*] Failed        : {len(failed_urls)}{ConsoleColors.RESET}")
+                note(f"Failed        : {len(failed_urls)}")
             
         except json.JSONDecodeError as e:
             error_msg = f"Invalid JSON format: {str(e)}"
             logging.error(error_msg)
-            print(f"{ConsoleColors.RED}[✗] {error_msg}{ConsoleColors.RESET}")
+            fail(f"{error_msg}")
         except Exception as e:
             error_msg = f"Unexpected error: {str(e)}"
             logging.error(error_msg, exc_info=True)
-            print(f"\n{ConsoleColors.RED}[✗] {error_msg}{ConsoleColors.RESET}")
+            fail(f"{error_msg}", blank=True)
 
     def center_text_in_box(text, box_width=48):
         visible_length = get_visible_length(text)
@@ -1008,7 +1035,8 @@ class InstagramUnliker:
             meta = self._read_import_meta() if LIKED_POSTS_PATH.exists() else None
             if meta:
                 print(f"{ConsoleColors.BLUE}📦 {meta.get('liked_total', 0):,} liked posts · "
-                      f"{meta.get('liked_reels', 0):,} reels · imported {meta.get('imported', '?')}{ConsoleColors.RESET}")
+                      f"{meta.get('liked_reels', 0):,} reels · "
+                      f"{self._imported_phrase(meta.get('imported'))}{ConsoleColors.RESET}")
             elif LIKED_POSTS_PATH.exists():
                 print(f"{ConsoleColors.BLUE}📦 Export imported{ConsoleColors.RESET}")
             else:
@@ -1049,7 +1077,7 @@ class InstagramUnliker:
                     print(f"👋 Have a great day!{ConsoleColors.RESET}")
                     break
                 else:
-                    print(f"\n{ConsoleColors.RED}✗ Invalid choice. Please try again.{ConsoleColors.RESET}")
+                    fail("Invalid choice. Please try again.", blank=True)
                     time.sleep(1)
                     
             except KeyboardInterrupt:
@@ -1059,17 +1087,16 @@ class InstagramUnliker:
             except EOFError:
                 break
             except Exception as e:
-                print(f"\n{ConsoleColors.RED}✗ Error: {str(e)}{ConsoleColors.RESET}")
+                fail(f"Error: {str(e)}", blank=True)
                 time.sleep(2)
 
     def _start_unliking_menu(self):
         accounts = self.list_accounts()
         if not accounts:
-            print(f"{ConsoleColors.RED}[✗] No accounts configured. Please add an account first.{ConsoleColors.RESET}")
+            fail("No accounts configured. Please add an account first.")
             return
             
-        print(f"\n{ConsoleColors.BLUE}[#] Select Account{ConsoleColors.RESET}")
-        print("-" * 30)
+        header("Select Account")
         
         for i, acc in enumerate(accounts, 1):
             account_file = self.accounts_dir / f"{acc}.json"
@@ -1085,31 +1112,30 @@ class InstagramUnliker:
             print(f"{ConsoleColors.BOLD}{i}{ConsoleColors.RESET}. [{acc}] - {status}")
             
         try:
-            choice = input(f"\n{ConsoleColors.BOLD}[>] Select account (0 to cancel): {ConsoleColors.RESET}")
+            choice = input(f"\n{ConsoleColors.BOLD}Select account (0 to cancel): {ConsoleColors.RESET}")
             if not choice.isdigit() or int(choice) == 0:
                 return
                 
             choice = int(choice)
             if choice < 1 or choice > len(accounts):
-                print(f"{ConsoleColors.RED}[✗] Invalid selection{ConsoleColors.RESET}")
+                fail("Invalid selection")
                 return
                 
             self.unlike_posts(accounts[choice - 1])
             
         except ValueError:
-            print(f"{ConsoleColors.RED}[✗] Invalid input{ConsoleColors.RESET}")
+            fail("Invalid input")
         except Exception as e:
-            print(f"{ConsoleColors.RED}[✗] Error: {str(e)}{ConsoleColors.RESET}")
+            fail(f"Error: {str(e)}")
 
     def show_statistics(self):
         accounts = self.list_accounts()
         if not accounts:
-            print(f"{ConsoleColors.YELLOW}No accounts added yet{ConsoleColors.RESET}")
+            warn("No accounts added yet")
             input(f"\n{ConsoleColors.BOLD}Press Enter to continue...{ConsoleColors.RESET}")
             return
             
-        print(f"\n{ConsoleColors.CYAN}📊 Statistics{ConsoleColors.RESET}")
-        print("=" * 40)
+        header("Statistics")
         
         total_unliked = 0
         for username in accounts:
@@ -1123,11 +1149,11 @@ class InstagramUnliker:
                 print(f"📌 Unliked posts: {data.get('total_unliked', 0)}")
                 if data.get('last_run'):
                     print(f"🕒 Last active: {datetime.fromisoformat(data['last_run']).strftime('%Y-%m-%d %H:%M')}")
-                print(f"✨ Status: {'OK' if not data.get('last_error') else 'Error'}")
+                fail("Status: Error") if data.get('last_error') else ok("Status: OK")
             except Exception as e:
-                print(f"{ConsoleColors.RED}Could not read data for {username}{ConsoleColors.RESET}")
+                fail(f"Could not read data for {username}")
                 
-        print(f"\n{ConsoleColors.GREEN}🎉 Total unliked: {total_unliked} posts{ConsoleColors.RESET}")
+        ok(f"Total unliked: {total_unliked} posts", blank=True)
         if self.excluded_users:
             print(f"{ConsoleColors.YELLOW}🚫 Excluding: {len(self.excluded_users)} users{ConsoleColors.RESET}")
         input(f"\n{ConsoleColors.BOLD}Press Enter to continue...{ConsoleColors.RESET}")
@@ -1159,7 +1185,7 @@ class InstagramUnliker:
                 choice = input(f"{ConsoleColors.WHITE}╰─▸{ConsoleColors.RESET} ").strip()
                 
                 if choice == "0":
-                    print(f"\n{ConsoleColors.GREEN}✓ Settings saved successfully!{ConsoleColors.RESET}")
+                    ok("Settings saved successfully!", blank=True)
                     time.sleep(1)
                     break
                     
@@ -1193,13 +1219,13 @@ class InstagramUnliker:
                             CONFIG['retry_delay'] = new_value
                             
                         self.save_config()
-                        print(f"\n{ConsoleColors.GREEN}✓ Setting updated successfully!{ConsoleColors.RESET}")
+                        ok("Setting updated successfully!", blank=True)
                         time.sleep(1)
                     else:
-                        print(f"\n{ConsoleColors.RED}✗ Invalid choice{ConsoleColors.RESET}")
+                        fail("Invalid choice", blank=True)
                         time.sleep(1)
                 except ValueError as e:
-                    print(f"\n{ConsoleColors.RED}✗ Invalid input: {str(e)}{ConsoleColors.RESET}")
+                    fail(f"Invalid input: {str(e)}", blank=True)
                     time.sleep(2)
             except KeyboardInterrupt:
                 break
@@ -1215,8 +1241,8 @@ class InstagramUnliker:
             ensta_spec = importlib.util.find_spec("ensta")
             if ensta_spec is None:
                 logging.error("ensta library not found")
-                print(f"{ConsoleColors.RED}[✗] ensta library not found")
-                print("→ Attempting to reinstall...{ConsoleColors.RESET}")
+                fail("ensta library not found")
+                note("Attempting to reinstall...")
                 self.install_requirements()
                 return False
                 
@@ -1226,8 +1252,8 @@ class InstagramUnliker:
                 return True
             except Exception as e:
                 logging.error(f"Error importing ensta: {str(e)}", exc_info=True)
-                print(f"{ConsoleColors.RED}[✗] Error importing ensta")
-                print("→ Attempting to fix by reinstalling...{ConsoleColors.RESET}")
+                fail("Error importing ensta")
+                note("Attempting to fix by reinstalling...")
                 self.install_requirements()
                 return False
         except Exception as e:
