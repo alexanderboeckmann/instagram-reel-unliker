@@ -1,6 +1,5 @@
-# Personal Instagram data exports
-liked_posts.json
-following.json
+# Imported Instagram data exports
+data/
 
 # Account stats
 accounts/

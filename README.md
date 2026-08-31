@@ -40,14 +40,8 @@ That means the export is the source of truth, and it has a useful property: it's
 1. Instagram → Settings → **Accounts Center** → Your information and permissions → **Download your information**
 2. Request a download, **format: JSON** (HTML exports cannot be read by this tool)
 3. Instagram emails you a ZIP, usually within 15–60 minutes
-4. Copy two files out of the ZIP into this folder:
 
-| File | Location in the export | Purpose |
-|---|---|---|
-| `liked_posts.json` | `your_instagram_activity/likes/` | The posts to work through |
-| `following.json` | `connections/followers_and_following/` | Accounts to skip |
-
-`following.json` is optional — without it the follow-filter is simply disabled and every liked reel is fair game.
+That's it — you don't have to unpack it or move anything by hand. See [Importing your export](#-importing-your-export) below.
 
 ### 2. Install
 
@@ -63,6 +57,35 @@ If `venv/` already exists but is broken — for example it points at a Python th
 ```bash
 rm -rf venv && ./run.sh
 ```
+
+## 📦 Importing your export
+
+Pick **Import Instagram Data** from the menu. It scans `~/Downloads` and `~/Desktop` for anything that looks like an Instagram export and offers it as a list, so most of the time it's one keystroke:
+
+```
+Exports found on this Mac:
+  1. instagram-yourname-2026-08-30-DSvOB6Y3 (folder, 2026-08-30)
+  2. instagram-yourname-2026-08-30-DSvOB6Y3.zip (zip, 2026-08-30)
+  p. Paste or drag in a different folder/zip
+  0. Cancel
+```
+
+If your export lives somewhere else, choose `p` and **drag the folder from Finder into the terminal window** — escaped and quoted paths both work. Or do it in one shot from the shell, typing the flag and then dragging the folder in:
+
+```bash
+unlike --import ~/Downloads/instagram-yourname-2026-08-30-DSvOB6Y3
+```
+
+A folder, the untouched `.zip`, or a single `liked_posts.json` / `following.json` are all accepted. The importer digs out the two files it needs, checks they parse, copies them into `data/`, and prints what it found:
+
+| File | Location in the export | Purpose |
+|---|---|---|
+| `liked_posts.json` | `your_instagram_activity/likes/` | The posts to work through |
+| `following.json` | `connections/followers_and_following/` | Accounts to skip |
+
+`following.json` is optional — without it the follow-filter is simply disabled and every liked reel is fair game.
+
+Once the copy is made it offers to delete the original export (they run ~100 MB), and *Start Unliking* prompts you to import first if you haven't — before asking for a password, not after.
 
 ## ▶️ Running it
 
@@ -96,13 +119,14 @@ Menu options:
 |---|---|
 | 1 | Add Instagram account (username only) |
 | 2 | Remove account |
-| 3 | Start unliking |
-| 4 | Manage excluded users |
-| 5 | View stats |
-| 6 | Settings |
+| 3 | Import Instagram data |
+| 4 | Start unliking |
+| 5 | Manage excluded users |
+| 6 | View stats |
+| 7 | Settings |
 | 0 | Exit |
 
-Add your account with **1** — username only, no password. Start with **3**; you are prompted for your password the first time, and only again once the saved session expires.
+Add your account with **1** — username only, no password. Import your export with **3**. Start with **4**; you are prompted for your password the first time, and only again once the saved session expires.
 
 If you change your Instagram password, nothing needs re-adding: the old session stops working and you are prompted for the new password on the next run.
 
@@ -175,7 +199,7 @@ tail -f logs/unliker.log
 
 ## ⚠️ Known limitations
 
-- **No resume state.** `liked_posts.json` is never rewritten, so an interrupted run restarts from the top of the list on the next launch. Re-unliking an already-unliked reel is harmless but wastes the whole queue. A fresh export is the fastest way to resume.
+- **No resume state.** `data/liked_posts.json` is never rewritten, so an interrupted run restarts from the top of the list on the next launch. Re-unliking an already-unliked reel is harmless but wastes the whole queue. A fresh export is the fastest way to resume.
 - **The stored session is readable by code running as you.** Keychain items this app writes are readable without a prompt by anything running under your user account. This protects against accidental commits, backups, cloud sync, and offline disk access — not against malware already running as you.
 - **No 2FA support.** There is no prompt for a verification code; login will fail if two-factor is enabled on the account.
 - **Rate limiting is a deterrent, not a guarantee.** Random delays and breaks reduce how mechanical the traffic looks. They do not make it invisible, and they are no protection against an action block.

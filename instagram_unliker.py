@@ -18,8 +18,19 @@ import signal
 from tqdm import tqdm
 import urllib.request
 import tempfile
+import shlex
+import zipfile
+import argparse
+import re
 from logging.handlers import RotatingFileHandler
 import atexit
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+LIKED_POSTS_PATH = DATA_DIR / "liked_posts.json"
+FOLLOWING_PATH = DATA_DIR / "following.json"
+IMPORT_META_PATH = DATA_DIR / "import_meta.json"
+EXPORT_SEARCH_DIRS = [Path.home() / "Downloads", Path.home() / "Desktop", BASE_DIR]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -263,6 +274,7 @@ class InstagramUnliker:
             self.accounts_dir.mkdir(exist_ok=True)
             os.chmod(self.accounts_dir, 0o700)
             self.logs_dir.mkdir(exist_ok=True)
+            DATA_DIR.mkdir(exist_ok=True)
             logging.info("Required directories created successfully")
         except Exception as e:
             logging.error(f"Failed to create directories: {str(e)}")
@@ -473,13 +485,316 @@ class InstagramUnliker:
         except Exception as e:
             print(f"{ConsoleColors.RED}[✗] Failed to save configuration: {str(e)}{ConsoleColors.RESET}")
 
+    @staticmethod
+    def _resolve_dropped_path(raw: str) -> Optional[Path]:
+        raw = raw.strip()
+        if not raw:
+            return None
+        try:
+            parts = shlex.split(raw)
+            token = parts[0] if parts else raw
+        except ValueError:
+            token = raw
+            if len(token) > 1 and token[0] == token[-1] and token[0] in "'\"":
+                token = token[1:-1]
+            token = token.replace('\\ ', ' ')
+        return Path(os.path.expanduser(token))
+
+    @staticmethod
+    def _export_label(path: Path) -> str:
+        match = re.search(r'(\d{4}-\d{2}-\d{2})', path.name)
+        if match:
+            return match.group(1)
+        try:
+            return datetime.fromtimestamp(path.stat().st_mtime).strftime('%Y-%m-%d')
+        except OSError:
+            return "unknown date"
+
+    @staticmethod
+    def _dir_size(path: Path) -> int:
+        if path.is_file():
+            return path.stat().st_size
+        total = 0
+        for root, _, files in os.walk(path):
+            for name in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, name))
+                except OSError:
+                    pass
+        return total
+
+    @staticmethod
+    def _human_size(num: int) -> str:
+        for unit in ('B', 'KB', 'MB', 'GB'):
+            if num < 1024 or unit == 'GB':
+                return f"{num:.0f} {unit}" if unit == 'B' else f"{num:.1f} {unit}"
+            num /= 1024.0
+        return f"{num:.1f} GB"
+
+    @staticmethod
+    def _discover_exports() -> List[Path]:
+        found = []
+        seen = set()
+        for directory in EXPORT_SEARCH_DIRS:
+            if not directory.is_dir():
+                continue
+            try:
+                entries = list(directory.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                if entry.resolve() in seen:
+                    continue
+                is_export = False
+                if entry.is_dir():
+                    is_export = entry.name.startswith('instagram-') or (entry / 'your_instagram_activity').is_dir()
+                elif entry.suffix.lower() == '.zip':
+                    is_export = entry.name.startswith('instagram-')
+                if is_export:
+                    seen.add(entry.resolve())
+                    found.append(entry)
+        found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return found[:5]
+
+    @staticmethod
+    def _looks_like_html(path: Path) -> bool:
+        try:
+            with open(path, 'rb') as f:
+                return f.read(2048).lstrip()[:1] == b'<'
+        except OSError:
+            return False
+
+    @staticmethod
+    def _classify_json(path: Path) -> Optional[str]:
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+        if isinstance(data, dict):
+            if 'relationships_following' in data:
+                return 'following'
+            if 'likes_media_likes' in data:
+                return 'liked_posts'
+            return None
+        if isinstance(data, list) and data and isinstance(data[0], dict) and 'label_values' in data[0]:
+            return 'liked_posts'
+        return None
+
+    def _locate_export_files(self, source: Path, workdir: Path) -> Tuple[Optional[Path], Optional[Path]]:
+        if not source.exists():
+            raise ValueError(f"Nothing found at {source}")
+
+        if source.is_file() and source.suffix.lower() == '.zip':
+            liked = following = None
+            with zipfile.ZipFile(source) as zf:
+                for member in zf.namelist():
+                    name = os.path.basename(member)
+                    if name == 'liked_posts.json' and liked is None:
+                        liked = Path(zf.extract(member, workdir))
+                    elif name == 'following.json' and following is None:
+                        following = Path(zf.extract(member, workdir))
+            return liked, following
+
+        if source.is_file():
+            if source.suffix.lower() in ('.html', '.htm') or self._looks_like_html(source):
+                raise ValueError(
+                    "That looks like an HTML export. Request your data again from Instagram "
+                    "and choose format: JSON."
+                )
+            kind = self._classify_json(source)
+            if kind == 'liked_posts':
+                return source, None
+            if kind == 'following':
+                return None, source
+            raise ValueError(f"{source.name} is not a liked_posts.json or following.json export file")
+
+        def pick(filename: str, preferred: str) -> Optional[Path]:
+            matches = sorted(source.rglob(filename))
+            if not matches:
+                return None
+            for match in matches:
+                if preferred in match.as_posix():
+                    return match
+            return matches[0]
+
+        liked = pick('liked_posts.json', 'your_instagram_activity/likes')
+        following = pick('following.json', 'connections/followers_and_following')
+        if liked is None and following is None:
+            raise ValueError(
+                f"No liked_posts.json or following.json found under {source}.\n"
+                "    Point this at the unzipped export folder (the one containing "
+                "'your_instagram_activity')."
+            )
+        return liked, following
+
+    def _validate_liked_posts(self, path: Path) -> Tuple[int, int]:
+        if self._looks_like_html(path):
+            raise ValueError(
+                "That liked_posts.json is HTML, not JSON. Request your data again from "
+                "Instagram and choose format: JSON."
+            )
+        try:
+            with open(path, 'r') as f:
+                raw = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Could not read {path.name} as JSON: {e}")
+
+        if isinstance(raw, dict):
+            raw = raw.get('likes_media_likes', [])
+        if not isinstance(raw, list) or not raw:
+            raise ValueError(f"{path.name} contains no liked posts")
+
+        total = reels = 0
+        for post in raw:
+            url, _ = self._parse_liked_post(post)
+            if not url:
+                continue
+            total += 1
+            if '/reel/' in url:
+                reels += 1
+        if total == 0:
+            raise ValueError(
+                f"{path.name} has {len(raw)} entries but no readable post URLs — "
+                "Instagram's export format may have changed."
+            )
+        return total, reels
+
+    @staticmethod
+    def _validate_following(path: Path) -> int:
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            raise ValueError(f"Could not read {path.name} as JSON: {e}")
+        if not isinstance(data, dict) or 'relationships_following' not in data:
+            raise ValueError(f"{path.name} is not an Instagram following export")
+        return len([e for e in data['relationships_following'] if e.get('title')])
+
+    @staticmethod
+    def _read_import_meta() -> Optional[dict]:
+        try:
+            return json.loads(IMPORT_META_PATH.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _prompt_for_source(self) -> Optional[Path]:
+        try:
+            return self._ask_for_source()
+        except EOFError:
+            return None
+
+    def _ask_for_source(self) -> Optional[Path]:
+        candidates = self._discover_exports()
+        if candidates:
+            print(f"\n{ConsoleColors.BLUE}Exports found on this Mac:{ConsoleColors.RESET}")
+            for i, candidate in enumerate(candidates, 1):
+                kind = "zip" if candidate.is_file() else "folder"
+                print(f"  {ConsoleColors.BOLD}{i}.{ConsoleColors.RESET} {candidate.name} "
+                      f"{ConsoleColors.WHITE}({kind}, {self._export_label(candidate)}){ConsoleColors.RESET}")
+            print(f"  {ConsoleColors.BOLD}p.{ConsoleColors.RESET} Paste or drag in a different folder/zip")
+            print(f"  {ConsoleColors.BOLD}0.{ConsoleColors.RESET} Cancel")
+            choice = input(f"\n{ConsoleColors.WHITE}╰─▸{ConsoleColors.RESET} ").strip().lower()
+            if choice in ('', '0'):
+                return None
+            if choice != 'p':
+                try:
+                    return candidates[int(choice) - 1]
+                except (ValueError, IndexError):
+                    print(f"{ConsoleColors.RED}Invalid choice{ConsoleColors.RESET}")
+                    return None
+        else:
+            print(f"\n{ConsoleColors.YELLOW}No Instagram export found in Downloads or Desktop.{ConsoleColors.RESET}")
+
+        print(f"\n{ConsoleColors.CYAN}Drag the unzipped export folder (or its .zip) from Finder "
+              f"into this window, then press Enter.{ConsoleColors.RESET}")
+        print(f"{ConsoleColors.WHITE}Leave empty to cancel.{ConsoleColors.RESET}")
+        return self._resolve_dropped_path(input(f"{ConsoleColors.WHITE}╰─▸{ConsoleColors.RESET} "))
+
+    def _offer_delete_source(self, source: Path):
+        if source.is_file() and source.suffix.lower() != '.zip':
+            return
+        try:
+            if source.resolve() == BASE_DIR or BASE_DIR in source.resolve().parents:
+                return
+        except OSError:
+            return
+        size = self._human_size(self._dir_size(source))
+        try:
+            answer = input(
+                f"\n{ConsoleColors.YELLOW}Delete the source export at {source} ({size})? (y/N): "
+                f"{ConsoleColors.RESET}"
+            ).strip().lower()
+        except EOFError:
+            return
+        if answer != 'y':
+            return
+        try:
+            if source.is_dir():
+                shutil.rmtree(source)
+            else:
+                source.unlink()
+            print(f"{ConsoleColors.GREEN}✓ Deleted {source}{ConsoleColors.RESET}")
+        except OSError as e:
+            print(f"{ConsoleColors.RED}[✗] Could not delete it: {e}{ConsoleColors.RESET}")
+
+    def import_export(self, source: Optional[Path] = None) -> bool:
+        if source is None:
+            source = self._prompt_for_source()
+        if source is None:
+            print(f"{ConsoleColors.YELLOW}Import cancelled{ConsoleColors.RESET}")
+            return False
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                liked_src, following_src = self._locate_export_files(source, Path(tmp))
+
+                liked_total = liked_reels = following_count = 0
+                if liked_src:
+                    liked_total, liked_reels = self._validate_liked_posts(liked_src)
+                if following_src:
+                    following_count = self._validate_following(following_src)
+
+                DATA_DIR.mkdir(exist_ok=True)
+                if liked_src:
+                    shutil.copy2(liked_src, LIKED_POSTS_PATH)
+                if following_src:
+                    shutil.copy2(following_src, FOLLOWING_PATH)
+        except (ValueError, zipfile.BadZipFile, OSError) as e:
+            print(f"\n{ConsoleColors.RED}[✗] {e}{ConsoleColors.RESET}")
+            logging.error(f"Import failed for {source}: {e}")
+            return False
+
+        print(f"\n{ConsoleColors.GREEN}✓ Imported from {source.name}{ConsoleColors.RESET}")
+        if liked_src:
+            print(f"  {ConsoleColors.WHITE}Liked posts   : {liked_total:,}{ConsoleColors.RESET}")
+            print(f"  {ConsoleColors.WHITE}Reels among them: {liked_reels:,}{ConsoleColors.RESET}")
+        if following_src:
+            print(f"  {ConsoleColors.WHITE}Following     : {following_count:,} (their reels will be skipped){ConsoleColors.RESET}")
+        else:
+            print(f"  {ConsoleColors.YELLOW}No following.json — the follow filter stays off{ConsoleColors.RESET}")
+
+        meta = self._read_import_meta() or {}
+        if liked_src:
+            meta.update({'liked_total': liked_total, 'liked_reels': liked_reels})
+        if following_src:
+            meta['following'] = following_count
+        meta.update({'source': source.name, 'imported': datetime.now().strftime('%Y-%m-%d')})
+        try:
+            IMPORT_META_PATH.write_text(json.dumps(meta, indent=2))
+        except OSError as e:
+            logging.warning(f"Could not write import metadata: {e}")
+
+        logging.info(f"Imported export from {source} ({liked_total} posts, {liked_reels} reels)")
+        self._offer_delete_source(source)
+        return True
+
     def _load_following(self) -> Set[str]:
-        following_file = 'following.json'
-        if not os.path.exists(following_file):
+        if not FOLLOWING_PATH.exists():
             logging.info("following.json not found — following filter disabled")
             return set()
         try:
-            with open(following_file, 'r') as f:
+            with open(FOLLOWING_PATH, 'r') as f:
                 data = json.load(f)
             following = {
                 entry['title'].lower()
@@ -519,6 +834,11 @@ class InstagramUnliker:
             print(f"\n{ConsoleColors.RED}[✗] {error_msg}. Please add it first.{ConsoleColors.RESET}")
             return
 
+        if not LIKED_POSTS_PATH.exists():
+            print(f"\n{ConsoleColors.YELLOW}[!] No Instagram export imported yet.{ConsoleColors.RESET}")
+            if not self.import_export():
+                return
+
         try:
             with open(account_file, 'r') as f:
                 account_data = json.load(f)
@@ -544,14 +864,8 @@ class InstagramUnliker:
                 print(f"→ Please check your username and password.{ConsoleColors.RESET}")
                 return
 
-            if not os.path.exists('liked_posts.json'):
-                error_msg = "liked_posts.json file not found"
-                logging.error(error_msg)
-                print(f"{ConsoleColors.RED}[✗] {error_msg}. Please ensure it exists.{ConsoleColors.RESET}")
-                return
-
             try:
-                with open('liked_posts.json', 'r') as f:
+                with open(LIKED_POSTS_PATH, 'r') as f:
                     raw_posts = json.load(f)
 
                 if isinstance(raw_posts, dict):
@@ -691,15 +1005,25 @@ class InstagramUnliker:
             
             if self.excluded_users:
                 print(f"{ConsoleColors.YELLOW}🚫 Excluding {len(self.excluded_users)} users{ConsoleColors.RESET}")
-                
+
+            meta = self._read_import_meta() if LIKED_POSTS_PATH.exists() else None
+            if meta:
+                print(f"{ConsoleColors.BLUE}📦 {meta.get('liked_total', 0):,} liked posts · "
+                      f"{meta.get('liked_reels', 0):,} reels · imported {meta.get('imported', '?')}{ConsoleColors.RESET}")
+            elif LIKED_POSTS_PATH.exists():
+                print(f"{ConsoleColors.BLUE}📦 Export imported{ConsoleColors.RESET}")
+            else:
+                print(f"{ConsoleColors.YELLOW}⚠️  No export imported yet — use option 3{ConsoleColors.RESET}")
+
             print(f"\n{ConsoleColors.CYAN}Available Actions:{ConsoleColors.RESET}")
             print(f"╭{'─' * 40}╮")
             print(menu_line("1", "Add Instagram Account"))
             print(menu_line("2", "Remove Account"))
-            print(menu_line("3", "Start Unliking"))
-            print(menu_line("4", "Manage Excluded Users"))
-            print(menu_line("5", "View Stats"))
-            print(menu_line("6", "Settings"))
+            print(menu_line("3", "Import Instagram Data"))
+            print(menu_line("4", "Start Unliking"))
+            print(menu_line("5", "Manage Excluded Users"))
+            print(menu_line("6", "View Stats"))
+            print(menu_line("7", "Settings"))
             print(menu_line("0", "Exit"))
             print(f"╰{'─' * 40}╯")
             
@@ -712,12 +1036,14 @@ class InstagramUnliker:
                 elif choice == "2":
                     self.remove_account()
                 elif choice == "3":
-                    self._start_unliking_menu()
+                    self.import_export()
                 elif choice == "4":
-                    self.manage_excluded_users()
+                    self._start_unliking_menu()
                 elif choice == "5":
-                    self.show_statistics()
+                    self.manage_excluded_users()
                 elif choice == "6":
+                    self.show_statistics()
+                elif choice == "7":
                     self.show_settings()
                 elif choice == "0":
                     print(f"\n{ConsoleColors.GREEN}✨ Thanks for using Instagram Unliker!")
@@ -936,8 +1262,21 @@ def menu_line(number, text, box_width=40):
     padding = box_width - visible_length + 1
     return f"{prefix}{content}{' ' * padding}│{ConsoleColors.RESET}"
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="unlike",
+        description="Unlike Instagram reels using your official Instagram data export."
+    )
+    parser.add_argument(
+        "--import", dest="import_path", metavar="PATH",
+        help="Import an Instagram export (folder, .zip, or a single liked_posts.json / "
+             "following.json) before showing the menu. Drag the folder from Finder to fill this in."
+    )
+    return parser.parse_args()
+
 def main():
     try:
+        args = parse_args()
         print("\nWelcome to Instagram Mass Unliker!")
         print("Checking system requirements...")
         
@@ -956,6 +1295,10 @@ def main():
             sys.exit(1)
         
         unliker.check_and_create_config()
+
+        if args.import_path:
+            unliker.import_export(InstagramUnliker._resolve_dropped_path(args.import_path))
+
         unliker.show_menu()
 
     except KeyboardInterrupt:
