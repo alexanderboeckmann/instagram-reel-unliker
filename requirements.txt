@@ -1,3 +1,0 @@
-ensta==5.2.9
-tqdm==4.67.1
-keyring

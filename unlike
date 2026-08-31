@@ -15,6 +15,7 @@ cd "$DIR"
 
 PY="venv/bin/python"
 STAMP="venv/.requirements"
+DEPS="ensta==5.2.9 tqdm==4.67.1 keyring"
 
 setup() {
     echo "Setting up (one time)..."
@@ -31,13 +32,13 @@ setup() {
     [ -x "$PY" ] || { rm -rf venv; python3 -m venv venv; }
 
     "$PY" -m pip install --quiet --upgrade pip
-    "$PY" -m pip install --quiet --no-cache-dir -r requirements.txt
+    "$PY" -m pip install --quiet --no-cache-dir $DEPS
 
     # ensta imports these at module scope but never reaches them here; the app stubs them out.
     "$PY" -m pip uninstall -y -q moviepy imageio imageio-ffmpeg numpy pillow pyquery lxml \
         proglog python-dotenv decorator cssselect
 
-    cp requirements.txt "$STAMP"
+    printf '%s\n' "$DEPS" > "$STAMP"
     link_onto_path
     echo
 }
@@ -68,7 +69,7 @@ link_onto_path() {
     esac
 }
 
-if [ ! -x "$PY" ] || ! cmp -s requirements.txt "$STAMP"; then
+if [ ! -x "$PY" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$DEPS" ]; then
     setup
 fi
 
