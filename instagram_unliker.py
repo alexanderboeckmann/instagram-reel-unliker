@@ -32,7 +32,13 @@ PROGRESS_DIR = DATA_DIR / "progress"
 EXPORT_SEARCH_DIRS = [Path.home() / "Downloads", Path.home() / "Desktop", BASE_DIR]
 
 LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
-BAR_DESC = "Unliking reels"
+
+CONTENT_KINDS = {'reels': ('reel',), 'posts': ('p', 'tv'), 'both': ('reel', 'p', 'tv')}
+CONTENT_NOUN = {'reels': 'reels', 'posts': 'posts', 'both': 'reels and posts'}
+CONTENT_TARGET_LABEL = {'reels': 'Reels to unlike', 'posts': 'Posts to unlike', 'both': 'To unlike'}
+CONTENT_SKIP_LABEL = {'reels': 'Non-reel posts', 'posts': 'Reels', 'both': 'Unusable entries'}
+KIND_LABEL = {'reel': 'Reel', 'p': 'Post', 'tv': 'Video'}
+URL_KIND_RE = re.compile(r'instagram\.com/(reel|p|tv)/')
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -52,6 +58,7 @@ CONFIG = {
     },
     "accounts": {},
     "excluded_users": [],
+    "content": "reels",
     "log_level": "INFO",
     "max_retries": 3,
     "retry_delay": 60
@@ -97,7 +104,10 @@ _active_bar = None
 
 
 def _emit(line: str):
-    _active_bar.write(line) if _active_bar else print(line)
+    try:
+        _active_bar.write(line) if _active_bar else print(line)
+    except (OSError, ValueError):
+        pass
 
 
 def _status(color: str, glyph: str, msg: str, level: int, blank: bool = False):
@@ -125,6 +135,21 @@ def header(title: str):
     logging.info(f"[{title}]", stacklevel=2)
     _emit(f"\n{ConsoleColors.CYAN}{ConsoleColors.BOLD}{title}{ConsoleColors.RESET}")
     _emit(f"{ConsoleColors.CYAN}{'─' * 40}{ConsoleColors.RESET}")
+
+
+def content_mode() -> str:
+    mode = str(CONFIG.get('content', 'reels')).lower()
+    return mode if mode in CONTENT_KINDS else 'reels'
+
+
+def _url_kind(url: str) -> Optional[str]:
+    match = URL_KIND_RE.search(url or '')
+    return match.group(1) if match else None
+
+
+def _in_scope(url: str) -> bool:
+    kind = _url_kind(url)
+    return kind is not None and kind in CONTENT_KINDS[content_mode()]
 
 
 def _reel_code(url: str) -> str:
@@ -282,12 +307,16 @@ class InstagramUnliker:
 
     def _write_account(self, account_file: Path, data: dict):
         data.pop('password', None)
-        with open(account_file, 'w', encoding='utf-8') as f:
+        tmp = account_file.with_name(account_file.name + '.tmp')
+        with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
         try:
-            os.chmod(account_file, 0o600)
+            os.chmod(tmp, 0o600)
         except OSError as e:
-            logging.warning(f"Could not tighten permissions on {account_file}: {e}")
+            logging.warning(f"Could not tighten permissions on {tmp}: {e}")
+        os.replace(tmp, account_file)
 
     def _prompt_password(self, username: str) -> str:
         return getpass(f"{ConsoleColors.BOLD}Password for @{username} (not echoed): {ConsoleColors.RESET}").strip()
@@ -315,8 +344,10 @@ class InstagramUnliker:
         logging.info(f"Loaded {len(self.excluded_users)} excluded users")
         
     def _setup_signal_handlers(self):
-        signal.signal(signal.SIGINT, self._handle_shutdown)
-        signal.signal(signal.SIGTERM, self._handle_shutdown)
+        for name in ('SIGINT', 'SIGTERM', 'SIGHUP'):
+            sig = getattr(signal, name, None)
+            if sig is not None:
+                signal.signal(sig, self._handle_shutdown)
         
     def _handle_shutdown(self, signum, frame):
         if not self.running:
@@ -730,7 +761,7 @@ class InstagramUnliker:
             )
         return liked, following
 
-    def _validate_liked_posts(self, path: Path) -> Tuple[int, int]:
+    def _validate_liked_posts(self, path: Path) -> Tuple[int, int, int]:
         if self._looks_like_html(path):
             raise ValueError(
                 "That liked_posts.json is HTML, not JSON. Request your data again from "
@@ -746,19 +777,22 @@ class InstagramUnliker:
         if not isinstance(records, list) or not records:
             raise ValueError(f"{path.name} contains no liked posts")
 
-        total = reels = 0
+        total = reels = posts = 0
         for _, url, _ in self._liked_entries(records):
-            if not url:
+            kind = _url_kind(url)
+            if kind is None:
                 continue
             total += 1
-            if '/reel/' in url:
+            if kind == 'reel':
                 reels += 1
+            else:
+                posts += 1
         if total == 0:
             raise ValueError(
                 f"{path.name} has {len(records)} entries but no readable post URLs — "
                 "Instagram's export format may have changed."
             )
-        return total, reels
+        return total, reels, posts
 
     @staticmethod
     def _validate_following(path: Path) -> int:
@@ -862,9 +896,9 @@ class InstagramUnliker:
             with tempfile.TemporaryDirectory() as tmp:
                 liked_src, following_src = self._locate_export_files(source, Path(tmp))
 
-                liked_total = liked_reels = following_count = 0
+                liked_total = liked_reels = liked_posts = following_count = 0
                 if liked_src:
-                    liked_total, liked_reels = self._validate_liked_posts(liked_src)
+                    liked_total, liked_reels, liked_posts = self._validate_liked_posts(liked_src)
                 if following_src:
                     following_count = self._validate_following(following_src)
 
@@ -879,16 +913,17 @@ class InstagramUnliker:
 
         ok(f"Imported from {source.name}", blank=True)
         if liked_src:
-            print(f"  {ConsoleColors.WHITE}Liked posts   : {liked_total:,}{ConsoleColors.RESET}")
-            print(f"  {ConsoleColors.WHITE}Reels among them: {liked_reels:,}{ConsoleColors.RESET}")
+            print(f"  {ConsoleColors.WHITE}Liked total   : {liked_total:,}{ConsoleColors.RESET}")
+            print(f"  {ConsoleColors.WHITE}  reels       : {liked_reels:,}{ConsoleColors.RESET}")
+            print(f"  {ConsoleColors.WHITE}  posts       : {liked_posts:,}{ConsoleColors.RESET}")
         if following_src:
-            print(f"  {ConsoleColors.WHITE}Following     : {following_count:,} (their reels will be skipped){ConsoleColors.RESET}")
+            print(f"  {ConsoleColors.WHITE}Following     : {following_count:,} (theirs will be skipped){ConsoleColors.RESET}")
         else:
             print(f"  {ConsoleColors.YELLOW}No following.json — the follow filter stays off{ConsoleColors.RESET}")
 
         meta = self._read_import_meta() or {}
         if liked_src:
-            meta.update({'liked_total': liked_total, 'liked_reels': liked_reels})
+            meta.update({'liked_total': liked_total, 'liked_reels': liked_reels, 'liked_posts': liked_posts})
         if following_src:
             meta['following'] = following_count
         meta.update({'source': source.name, 'imported': datetime.now().strftime('%Y-%m-%d')})
@@ -897,7 +932,7 @@ class InstagramUnliker:
         except OSError as e:
             logging.warning(f"Could not write import metadata: {e}")
 
-        logging.info(f"Imported export from {source} ({liked_total} posts, {liked_reels} reels)")
+        logging.info(f"Imported export from {source} ({liked_total} liked: {liked_reels} reels, {liked_posts} posts)")
         self._offer_delete_source(source)
         return True
 
@@ -974,7 +1009,9 @@ class InstagramUnliker:
             with open(account_file, 'r', encoding='utf-8') as f:
                 account_data = json.load(f)
 
-            header(f"Unliking reels for @{username}")
+            mode = content_mode()
+            noun = CONTENT_NOUN[mode]
+            header(f"Unliking {noun} for @{username}")
 
             following = self._load_following()
             if following:
@@ -1003,14 +1040,14 @@ class InstagramUnliker:
                     warn("No liked posts found in liked_posts.json")
                     return
 
-                reels_only: list = []
-                skipped_not_reel = 0
+                targets: list = []
+                skipped_scope = 0
                 skipped_following = 0
                 skipped_excluded = 0
 
                 for post, url, post_username in self._liked_entries(records):
-                    if not url or '/reel/' not in url:
-                        skipped_not_reel += 1
+                    if not _in_scope(url):
+                        skipped_scope += 1
                         continue
 
                     if post_username and post_username in following:
@@ -1023,23 +1060,23 @@ class InstagramUnliker:
                         logging.debug(f"Skipping reel from excluded user: @{post_username}")
                         continue
 
-                    reels_only.append((post, url, post_username))
+                    targets.append((post, url, post_username))
 
                 resume = ProgressStore(username, self._export_fingerprint())
                 if resume.done:
-                    reels_only = [entry for entry in reels_only if entry[1] not in resume.done]
+                    targets = [entry for entry in targets if entry[1] not in resume.done]
                 already_done = len(resume.done)
-                total_posts = len(reels_only)
+                total_posts = len(targets)
 
                 print(f"\n{ConsoleColors.BLUE}Filter summary:{ConsoleColors.RESET}")
-                print(f"  {ConsoleColors.GREEN}Reels to unlike : {total_posts}{ConsoleColors.RESET}")
-                print(f"  {ConsoleColors.YELLOW}Non-reel posts  : {skipped_not_reel} (skipped){ConsoleColors.RESET}")
-                print(f"  {ConsoleColors.YELLOW}From following  : {skipped_following} (skipped){ConsoleColors.RESET}")
+                print(f"  {ConsoleColors.GREEN}{CONTENT_TARGET_LABEL[mode]:<16}: {total_posts}{ConsoleColors.RESET}")
+                print(f"  {ConsoleColors.YELLOW}{CONTENT_SKIP_LABEL[mode]:<16}: {skipped_scope} (skipped){ConsoleColors.RESET}")
+                print(f"  {ConsoleColors.YELLOW}{'From following':<16}: {skipped_following} (skipped){ConsoleColors.RESET}")
                 if skipped_excluded:
-                    print(f"  {ConsoleColors.YELLOW}Excluded users  : {skipped_excluded} (skipped){ConsoleColors.RESET}")
+                    print(f"  {ConsoleColors.YELLOW}{'Excluded users':<16}: {skipped_excluded} (skipped){ConsoleColors.RESET}")
                 if already_done:
-                    print(f"  {ConsoleColors.BLUE}Done earlier    : {already_done} (resuming){ConsoleColors.RESET}")
-                logging.info(f"Filter summary: {total_posts} to unlike, {skipped_not_reel} non-reel, "
+                    print(f"  {ConsoleColors.BLUE}{'Done earlier':<16}: {already_done} (resuming){ConsoleColors.RESET}")
+                logging.info(f"Filter summary ({mode}): {total_posts} to unlike, {skipped_scope} out of scope, "
                              f"{skipped_following} from following, {skipped_excluded} excluded, "
                              f"{already_done} done earlier")
 
@@ -1052,25 +1089,26 @@ class InstagramUnliker:
                 mean_break = (CONFIG['break']['min'] + CONFIG['break']['max']) / 2
                 multiplier = CONFIG['accounts'].get(username, {}).get('delay_multiplier', 1.0)
                 per_reel = mean_delay * multiplier + CONFIG['break']['probability'] * mean_break
-                note(f"About {_human_duration(per_reel)} per reel — "
-                     f"{total_posts} reels is roughly {_human_duration(per_reel * total_posts)}")
+                note(f"About {_human_duration(per_reel)} each — "
+                     f"{total_posts} {noun} is roughly {_human_duration(per_reel * total_posts)}")
 
                 unliked_count = 0
                 failed_urls: list = []
                 self.running = True
 
+                bar_desc = f"Unliking {noun}"
                 progress_bar = tqdm(
                     total=total_posts,
-                    desc=BAR_DESC,
+                    desc=bar_desc,
                     file=sys.stdout,
                     bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [ETA: {remaining}]'
                 )
                 _active_bar = progress_bar
 
                 pending = self._next_delay(username)
-                note(f"Starting — first reel in {_human_duration(pending)}")
+                note(f"Starting — first in {_human_duration(pending)}")
 
-                for post, url, post_username in reels_only:
+                for post, url, post_username in targets:
                     if not self.running:
                         break
                     try:
@@ -1095,6 +1133,8 @@ class InstagramUnliker:
                         unliked_count += 1
                         account_data['total_unliked'] += 1
                         resume.record(url)
+                        account_data['last_run'] = datetime.now().isoformat()
+                        self._write_account(account_file, account_data)
                         progress_bar.update(1)
 
                         pending = self._next_delay(username)
@@ -1106,10 +1146,10 @@ class InstagramUnliker:
                             break_time = random.uniform(CONFIG['break']['min'], CONFIG['break']['max'])
                             progress_bar.set_description("On a break")
                             self._wait(break_time, f"Break for {_human_duration(break_time)}")
-                            progress_bar.set_description(BAR_DESC)
+                            progress_bar.set_description(bar_desc)
 
                     except Exception as e:
-                        error_msg = f"Reel {_reel_code(url)} failed: {e}"
+                        error_msg = f"{KIND_LABEL.get(_url_kind(url), 'Item')} {_reel_code(url)} failed: {e}"
                         fail(error_msg)
                         if logging.getLogger().isEnabledFor(logging.DEBUG):
                             logging.debug("Failure detail", exc_info=True)
@@ -1117,7 +1157,7 @@ class InstagramUnliker:
                         failed_urls.append(url)
                         progress_bar.set_description("Cooling down")
                         self._wait(300, "Cooling down after that failure")
-                        progress_bar.set_description(BAR_DESC)
+                        progress_bar.set_description(bar_desc)
 
             finally:
                 self.running = False
@@ -1126,12 +1166,11 @@ class InstagramUnliker:
                     progress_bar.close()
                 if resume is not None:
                     resume.close()
-
-            account_data['last_run'] = datetime.now().isoformat()
-            self._write_account(account_file, account_data)
+                account_data['last_run'] = datetime.now().isoformat()
+                self._write_account(account_file, account_data)
 
             ok(f"Unliking complete for {username}", blank=True)
-            note(f"Reels unliked : {unliked_count}")
+            note(f"Unliked       : {unliked_count}")
             if failed_urls:
                 note(f"Failed        : {len(failed_urls)}")
             remaining = total_posts - unliked_count
@@ -1168,8 +1207,8 @@ class InstagramUnliker:
 
             meta = self._read_import_meta() if LIKED_POSTS_PATH.exists() else None
             if meta:
-                print(f"{ConsoleColors.BLUE}{meta.get('liked_total', 0):,} liked posts · "
-                      f"{meta.get('liked_reels', 0):,} reels · "
+                print(f"{ConsoleColors.BLUE}{meta.get('liked_reels', 0):,} reels · "
+                      f"{meta.get('liked_posts', 0):,} posts · "
                       f"{self._imported_phrase(meta.get('imported'))}{ConsoleColors.RESET}")
             elif LIKED_POSTS_PATH.exists():
                 print(f"{ConsoleColors.BLUE}Export imported{ConsoleColors.RESET}")
@@ -1311,6 +1350,9 @@ class InstagramUnliker:
             print(f"  {ConsoleColors.BOLD}4.{ConsoleColors.RESET} Minimum Break     : {ConsoleColors.GREEN}{CONFIG['break']['min'] / 60:.1f}{ConsoleColors.RESET} minutes")
             print(f"  {ConsoleColors.BOLD}5.{ConsoleColors.RESET} Maximum Break     : {ConsoleColors.GREEN}{CONFIG['break']['max'] / 60:.1f}{ConsoleColors.RESET} minutes")
             
+            print(f"\n{ConsoleColors.YELLOW}▸ What to unlike{ConsoleColors.RESET}")
+            print(f"  {ConsoleColors.BOLD}8.{ConsoleColors.RESET} Content           : {ConsoleColors.GREEN}{content_mode()}{ConsoleColors.RESET}")
+
             print(f"\n{ConsoleColors.YELLOW}▸ Retry Settings{ConsoleColors.RESET}")
             print(f"  {ConsoleColors.BOLD}6.{ConsoleColors.RESET} Maximum Retries   : {ConsoleColors.GREEN}{CONFIG['max_retries']}{ConsoleColors.RESET}")
             print(f"  {ConsoleColors.BOLD}7.{ConsoleColors.RESET} Retry Delay       : {ConsoleColors.GREEN}{CONFIG['retry_delay']}{ConsoleColors.RESET} seconds")
@@ -1328,7 +1370,7 @@ class InstagramUnliker:
                     break
                     
                 try:
-                    if choice in ["1", "2", "3", "4", "5", "6", "7"]:
+                    if choice in ["1", "2", "3", "4", "5", "6", "7", "8"]:
                         print(f"{ConsoleColors.WHITE}╭─{ConsoleColors.RESET}")
                         
                         if choice == "1":
@@ -1355,6 +1397,13 @@ class InstagramUnliker:
                         elif choice == "7":
                             new_value = int(input(f"{ConsoleColors.WHITE}╰─▸ Enter new retry delay (seconds): {ConsoleColors.RESET}"))
                             CONFIG['retry_delay'] = new_value
+                        elif choice == "8":
+                            print(f"{ConsoleColors.WHITE}│  1. reels  2. posts  3. both{ConsoleColors.RESET}")
+                            picked = {'1': 'reels', '2': 'posts', '3': 'both'}.get(
+                                input(f"{ConsoleColors.WHITE}╰─▸ Unlike which content? {ConsoleColors.RESET}").strip())
+                            if not picked:
+                                raise ValueError("Pick 1, 2 or 3")
+                            CONFIG['content'] = picked
                             
                         self.save_config()
                         ok("Setting updated successfully!", blank=True)

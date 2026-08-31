@@ -1,6 +1,6 @@
 # Instagram Reel Unliker
 
-> Bulk-unlike Instagram reels, skipping accounts you follow. Free, open-source, runs entirely on your own machine.
+> Bulk-unlike Instagram reels and posts, skipping accounts you follow. Free, open-source, runs entirely on your own machine.
 
 <div align="center">
 
@@ -12,10 +12,12 @@
 
 A fork of [TahaGorme/InstaMassUnliker](https://github.com/TahaGorme/InstaMassUnliker) with two behavioural changes:
 
-- **Reels only.** Regular posts (`/p/` URLs) are left alone — only `/reel/` links are unliked.
-- **Skips accounts you follow.** Anyone in your `following.json` is excluded automatically, so you only clear likes on reels from accounts you *don't* follow.
+- **You choose reels, posts, or both.** The `content` setting decides what a run touches. It defaults to `reels`, so out of the box only `/reel/` links are unliked and regular posts are left alone — set it to `posts` or `both` to widen that.
+- **Skips accounts you follow.** Anyone in your `following.json` is excluded automatically, so you only clear likes from accounts you *don't* follow.
 
 Plus a manual exclude list on top of that, for accounts you don't follow but still want left untouched.
+
+Switching `content` mid-export is safe: progress is tracked per item, so turning `reels` into `both` picks up the posts without touching anything already unliked.
 
 ## Table of Contents
 - [How it works](#how-it-works)
@@ -32,7 +34,7 @@ Plus a manual exclude list on top of that, for accounts you don't follow but sti
 
 ## How it works
 
-This tool does **not** scrape your likes from the Instagram UI. It reads your official Instagram data export, filters it, and then calls Instagram's unlike endpoint once per reel via [`ensta`](https://pypi.org/project/ensta/).
+This tool does **not** scrape your likes from the Instagram UI. It reads your official Instagram data export, filters it, and then calls Instagram's unlike endpoint once per item via [`ensta`](https://pypi.org/project/ensta/).
 
 That means the export is the source of truth, and it has a useful property: it's a snapshot of what you *currently* like. Request a fresh export and everything you've already unliked simply drops out of the list.
 
@@ -84,10 +86,10 @@ A folder, the untouched `.zip`, or a single `liked_posts.json` / `following.json
 
 | File | Location in the export | Purpose |
 |---|---|---|
-| `liked_posts.json` | `your_instagram_activity/likes/` | The posts to work through |
+| `liked_posts.json` | `your_instagram_activity/likes/` | The likes to work through |
 | `following.json` | `connections/followers_and_following/` | Accounts to skip |
 
-`following.json` is optional — without it the follow-filter is simply disabled and every liked reel is fair game.
+`following.json` is optional — without it the follow-filter is simply disabled and every liked item in scope is fair game.
 
 Once the copy is made it offers to delete the original export (they run ~100 MB), and *Start Unliking* prompts you to import first if you haven't — before asking for a password, not after.
 
@@ -157,9 +159,9 @@ If the `keyring` package or a usable backend is missing, nothing is persisted an
 
 ## Long runs
 
-At the default 20–100 second delay, a large backlog takes **days**, not hours — roughly 80 seconds per reel once the occasional long break is averaged in, so a 5,000-reel backlog runs for about five days. Any failure adds a 5-minute cooldown on top. The run prints that estimate up front, from your own `config.json`, before it starts.
+At the default 20–100 second delay, a large backlog takes **days**, not hours — roughly 80 seconds per item once the occasional long break is averaged in, so a 5,000-item backlog runs for about five days. Any failure adds a 5-minute cooldown on top. The run prints that estimate up front, from your own `config.json`, before it starts.
 
-Because most of a run is spent waiting, every wait says what it is and when it ends:
+Because most of a run is spent waiting, every wait says what it is and when it ends (this is a `content: reels` run — the labels follow the setting):
 
 ```
 Unliking reels for @you
@@ -171,7 +173,8 @@ Filter summary:
   Reels to unlike : 4812
   Non-reel posts  : 26113 (skipped)
   From following  : 884 (skipped)
-· About 1m 22s per reel — 4812 reels is roughly 4d 14h
+· About 1m 22s each — 4812 reels is roughly 4d 14h
+· Starting — first in 52s
 
 Unliking reels:   1%|▏                | 47/4812 [ETA: 109:11:52]
 ✓ 47/4812 · @travelclips · next in 38s
@@ -185,7 +188,7 @@ Unliking reels:   1%|▏                | 47/4812 [ETA: 109:11:52]
 · Resuming
 ```
 
-The bar's own ETA is derived from observed rate, so a single long break skews it for a while; the `About … per reel` line is computed from your config and doesn't drift. The bar's label changes to `On a break` or `Cooling down` while it waits, so a stalled bar always says why.
+The bar's own ETA is derived from observed rate, so a single long break skews it for a while; the `About … each` line is computed from your config and doesn't drift. The bar's label changes to `On a break` or `Cooling down` while it waits, so a stalled bar always says why.
 
 The menu is interactive, so it can't be backgrounded with `nohup`. Use `screen`, which ships with macOS:
 
@@ -216,7 +219,7 @@ Set `log_level` to `WARNING` in `config.json` to keep only problems in the log; 
 
 ## Resuming an interrupted run
 
-Each reel is appended to `data/progress/<username>.txt` and flushed the moment it is unliked, so a run that stops for any reason — Ctrl-C, a dropped connection, a closed laptop, a crash — loses at most the reel in flight. The next *Start Unliking* skips everything already done and reports it:
+Each item is appended to `data/progress/<username>.txt` and flushed the moment it is unliked, so a run that stops for any reason — Ctrl-C, a dropped connection, a closed laptop, a crash, even `kill -9` — loses at most the one in flight. Your stats (`accounts/<username>.json`) are written the same way, so the unlike count survives a crash too. The next *Start Unliking* skips everything already done and reports it:
 
 ```
 Filter summary:
@@ -226,7 +229,7 @@ Filter summary:
   Done earlier    : 1204 (resuming)
 ```
 
-The account picker shows the same count, so you can see how far along you are before starting. Reels that *failed* are deliberately not recorded — they come back around on the next run.
+The account picker shows the same count, so you can see how far along you are before starting. Items that *failed* are deliberately not recorded — they come back around on the next run.
 
 The first line of the file is a fingerprint of `liked_posts.json`. Import a different export and the fingerprint stops matching, so the old progress is discarded: a fresh export has already dropped everything you unliked, and there is nothing left to skip.
 
@@ -250,6 +253,7 @@ Removing the account with menu option **2** deletes it too.
         "your_username": { "enabled": true, "delay_multiplier": 1.0 }
     },
     "excluded_users": [],
+    "content": "reels",
     "log_level": "INFO",
     "max_retries": 3,
     "retry_delay": 60
@@ -257,10 +261,11 @@ Removing the account with menu option **2** deletes it too.
 ```
 
 - **`delay`** — seconds between unlikes, randomised in this range. Lower is faster and more conspicuous.
-- **`break`** — with `probability` per reel, pause for a random duration in this range.
+- **`break`** — with `probability` per item, pause for a random duration in this range.
 - **`delay_multiplier`** — per-account scaling of the delay.
 - **`excluded_users`** — usernames never touched, on top of the automatic follow-filter. Edit via menu option **5**.
-- **`log_level`** — verbosity of `logs/unliker.log`. `DEBUG` also records why each individual reel was skipped; `WARNING` keeps the log to problems only.
+- **`content`** — what a run unlikes: `reels` (default), `posts`, or `both`. `posts` covers `/p/` and `/tv/` links. Edit via **Settings → 8**.
+- **`log_level`** — verbosity of `logs/unliker.log`. `DEBUG` also records why each individual item was skipped; `WARNING` keeps the log to problems only.
 
 ## Known limitations
 
