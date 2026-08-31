@@ -11,7 +11,7 @@ import types
 import importlib.util
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, List, Tuple, Set
+from typing import Optional, List, NamedTuple, Tuple, Set
 from getpass import getpass
 import signal
 from tqdm import tqdm
@@ -33,10 +33,18 @@ EXPORT_SEARCH_DIRS = [Path.home() / "Downloads", Path.home() / "Desktop", BASE_D
 
 LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
 
-CONTENT_KINDS = {'reels': ('reel',), 'posts': ('p', 'tv'), 'both': ('reel', 'p', 'tv')}
-CONTENT_NOUN = {'reels': 'reels', 'posts': 'posts', 'both': 'reels and posts'}
-CONTENT_TARGET_LABEL = {'reels': 'Reels to unlike', 'posts': 'Posts to unlike', 'both': 'To unlike'}
-CONTENT_SKIP_LABEL = {'reels': 'Non-reel posts', 'posts': 'Reels', 'both': 'Unusable entries'}
+class ContentMode(NamedTuple):
+    kinds: Tuple[str, ...]
+    noun: str
+    target_label: str
+    skip_label: str
+
+
+CONTENT_MODES = {
+    'reels': ContentMode(('reel',), 'reels', 'Reels to unlike', 'Non-reel posts'),
+    'posts': ContentMode(('p', 'tv'), 'posts', 'Posts to unlike', 'Reels'),
+    'both': ContentMode(('reel', 'p', 'tv'), 'reels and posts', 'To unlike', 'Unusable entries'),
+}
 KIND_LABEL = {'reel': 'Reel', 'p': 'Post', 'tv': 'Video'}
 URL_KIND_RE = re.compile(r'instagram\.com/(reel|p|tv)/')
 
@@ -139,7 +147,7 @@ def header(title: str):
 
 def content_mode() -> str:
     mode = str(CONFIG.get('content', 'reels')).lower()
-    return mode if mode in CONTENT_KINDS else 'reels'
+    return mode if mode in CONTENT_MODES else 'reels'
 
 
 def _url_kind(url: str) -> Optional[str]:
@@ -149,7 +157,7 @@ def _url_kind(url: str) -> Optional[str]:
 
 def _in_scope(url: str) -> bool:
     kind = _url_kind(url)
-    return kind is not None and kind in CONTENT_KINDS[content_mode()]
+    return kind is not None and kind in CONTENT_MODES[content_mode()].kinds
 
 
 def _reel_code(url: str) -> str:
@@ -169,6 +177,61 @@ def _human_duration(seconds: float) -> str:
         return f"{h}h {m}m" if m else f"{h}h"
     d, h = divmod(seconds // 3600, 24)
     return f"{d}d {h}h" if h else f"{d}d"
+
+
+class Setting(NamedTuple):
+    group: str
+    label: str
+    path: Tuple[str, ...]
+    show: object
+    unit: str
+    prompt: str
+    parse: object
+
+
+def _cfg_set(path: Tuple[str, ...], value):
+    target = CONFIG
+    for part in path[:-1]:
+        target = target[part]
+    target[path[-1]] = value
+
+
+def _probability(raw: str) -> float:
+    value = float(raw)
+    if not 0 <= value <= 1:
+        raise ValueError("Probability must be between 0 and 1")
+    return value
+
+
+def _minutes(raw: str) -> float:
+    return float(raw) * 60
+
+
+def _content_choice(raw: str) -> str:
+    picked = {'1': 'reels', '2': 'posts', '3': 'both'}.get(raw.strip())
+    if not picked:
+        raise ValueError("Pick 1, 2 or 3")
+    return picked
+
+
+SETTINGS = [
+    Setting('Delay Settings', 'Minimum Delay', ('delay', 'min'),
+            lambda: CONFIG['delay']['min'], 'seconds', 'Enter new minimum delay (seconds)', float),
+    Setting('Delay Settings', 'Maximum Delay', ('delay', 'max'),
+            lambda: CONFIG['delay']['max'], 'seconds', 'Enter new maximum delay (seconds)', float),
+    Setting('Break Settings', 'Break Probability', ('break', 'probability'),
+            lambda: f"{CONFIG['break']['probability'] * 100}%", '', 'Enter new break probability (0-1)', _probability),
+    Setting('Break Settings', 'Minimum Break', ('break', 'min'),
+            lambda: f"{CONFIG['break']['min'] / 60:.1f}", 'minutes', 'Enter new minimum break time (minutes)', _minutes),
+    Setting('Break Settings', 'Maximum Break', ('break', 'max'),
+            lambda: f"{CONFIG['break']['max'] / 60:.1f}", 'minutes', 'Enter new maximum break time (minutes)', _minutes),
+    Setting('Retry Settings', 'Maximum Retries', ('max_retries',),
+            lambda: CONFIG['max_retries'], '', 'Enter new maximum retries', int),
+    Setting('Retry Settings', 'Retry Delay', ('retry_delay',),
+            lambda: CONFIG['retry_delay'], 'seconds', 'Enter new retry delay (seconds)', int),
+    Setting('What to unlike', 'Content', ('content',),
+            content_mode, '', 'Unlike which content? (1. reels  2. posts  3. both)', _content_choice),
+]
 
 
 class SessionStore:
@@ -268,7 +331,6 @@ class InstagramUnliker:
         self.accounts_dir = BASE_DIR / "accounts"
         self.logs_dir = BASE_DIR / "logs"
         self.running = False
-        self.excluded_users: Set[str] = set()
 
         self.setup_logging()
         logging.info("Starting Instagram Unliker application...")
@@ -339,8 +401,15 @@ class InstagramUnliker:
             raise ValueError("No password provided")
         return Web(username, password, load=lambda: "", save=saver)
 
+    @property
+    def excluded_users(self) -> Set[str]:
+        return set(CONFIG.get('excluded_users', []))
+
+    def _set_excluded_users(self, users: Set[str]):
+        CONFIG['excluded_users'] = sorted(users)
+        self.save_config()
+
     def _load_excluded_users(self):
-        self.excluded_users = set(CONFIG.get('excluded_users', []))
         logging.info(f"Loaded {len(self.excluded_users)} excluded users")
         
     def _setup_signal_handlers(self):
@@ -400,18 +469,22 @@ class InstagramUnliker:
 
         atexit.register(self._cleanup_logs)
 
+    @staticmethod
+    def _parse_log_level(name) -> Optional[int]:
+        level = getattr(logging, str(name).upper(), None)
+        return level if isinstance(level, int) else None
+
     def _level_from_config_file(self) -> int:
         try:
             name = json.loads(self.config_file.read_text(encoding='utf-8'))['log_level']
         except Exception:
             name = CONFIG['log_level']
-        level = getattr(logging, str(name).upper(), None)
-        return level if isinstance(level, int) else logging.INFO
+        return self._parse_log_level(name) or logging.INFO
 
     def _apply_log_level(self):
         name = str(CONFIG.get('log_level', 'INFO')).upper()
-        level = getattr(logging, name, None)
-        if not isinstance(level, int):
+        level = self._parse_log_level(name)
+        if level is None:
             warn(f"Unknown log_level {name} in config.json — using INFO")
             level = logging.INFO
         root_logger = logging.getLogger()
@@ -450,8 +523,7 @@ class InstagramUnliker:
 
     def check_and_create_config(self):
         if not os.path.exists(self.config_file):
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(CONFIG, f, indent=4)
+            self.save_config()
             ok("Created default configuration file")
         else:
             try:
@@ -479,7 +551,7 @@ class InstagramUnliker:
         
         self.accounts_dir.mkdir(exist_ok=True)
         os.chmod(self.accounts_dir, 0o700)
-        account_file = self.accounts_dir / f"{username}.json"
+        account_file = self._account_path(username)
         
         if account_file.exists():
             override = input(f"{ConsoleColors.YELLOW}Account exists. Replace? (y/N): {ConsoleColors.RESET}").lower()
@@ -519,17 +591,10 @@ class InstagramUnliker:
             print(f"{i}. {acc}")
             
         try:
-            choice = input(f"\n{ConsoleColors.BOLD}Select account to remove (0 to cancel): {ConsoleColors.RESET}")
-            if not choice.isdigit() or int(choice) == 0:
+            username = self._pick(accounts, "Select account to remove (0 to cancel)")
+            if username is None:
                 return
-                
-            choice = int(choice)
-            if choice < 1 or choice > len(accounts):
-                fail("Invalid selection")
-                return
-                
-            username = accounts[choice - 1]
-            account_file = self.accounts_dir / f"{username}.json"
+            account_file = self._account_path(username)
             
             confirm = input(f"{ConsoleColors.YELLOW}! Are you sure you want to remove {username}? (y/N): {ConsoleColors.RESET}").lower()
             if confirm != 'y':
@@ -572,9 +637,7 @@ class InstagramUnliker:
             if choice == "1":
                 username = input(f"{ConsoleColors.BOLD}Enter username to exclude: {ConsoleColors.RESET}").strip().lower()
                 if username:
-                    self.excluded_users.add(username)
-                    CONFIG['excluded_users'] = list(self.excluded_users)
-                    self.save_config()
+                    self._set_excluded_users(self.excluded_users | {username})
                     ok(f"Added @{username} to exclude list")
                     
             elif choice == "2":
@@ -584,9 +647,7 @@ class InstagramUnliker:
                     
                 username = input(f"{ConsoleColors.BOLD}Enter username to remove: {ConsoleColors.RESET}").strip().lower()
                 if username in self.excluded_users:
-                    self.excluded_users.remove(username)
-                    CONFIG['excluded_users'] = list(self.excluded_users)
-                    self.save_config()
+                    self._set_excluded_users(self.excluded_users - {username})
                     ok(f"Removed @{username} from exclude list")
                 else:
                     warn("User not found in exclude list")
@@ -595,9 +656,7 @@ class InstagramUnliker:
                 if self.excluded_users:
                     confirm = input(f"{ConsoleColors.YELLOW}Clear all excluded users? (y/N): {ConsoleColors.RESET}").lower()
                     if confirm == 'y':
-                        self.excluded_users.clear()
-                        CONFIG['excluded_users'] = []
-                        self.save_config()
+                        self._set_excluded_users(set())
                         ok("Cleared all excluded users")
                         
             elif choice == "0":
@@ -606,6 +665,20 @@ class InstagramUnliker:
                 fail("Invalid option")
             
             time.sleep(1)
+
+    @staticmethod
+    def _pick(options: List[str], prompt: str) -> Optional[str]:
+        choice = input(f"\n{ConsoleColors.BOLD}{prompt}: {ConsoleColors.RESET}")
+        if not choice.isdigit() or int(choice) == 0:
+            return None
+        index = int(choice)
+        if index < 1 or index > len(options):
+            fail("Invalid selection")
+            return None
+        return options[index - 1]
+
+    def _account_path(self, username: str) -> Path:
+        return self.accounts_dir / f"{username}.json"
 
     def list_accounts(self) -> List[str]:
         if not self.accounts_dir.exists():
@@ -676,7 +749,8 @@ class InstagramUnliker:
             except OSError:
                 continue
             for entry in entries:
-                if entry.resolve() in seen:
+                resolved = entry.resolve()
+                if resolved in seen:
                     continue
                 is_export = False
                 if entry.is_dir():
@@ -684,7 +758,7 @@ class InstagramUnliker:
                 elif entry.suffix.lower() == '.zip':
                     is_export = entry.name.startswith('instagram-')
                 if is_export:
-                    seen.add(entry.resolve())
+                    seen.add(resolved)
                     found.append(entry)
         found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return found[:5]
@@ -989,15 +1063,28 @@ class InstagramUnliker:
             url, post_username = cls._parse_liked_post(post)
             yield post, url, post_username
 
-    def unlike_posts(self, username: str):
+    def _unlike_with_retry(self, client, media_id):
+        attempts = CONFIG['max_retries']
+        for retry in range(attempts):
+            try:
+                client.unlike(media_id)
+                return
+            except Exception as e:
+                if retry < attempts - 1 and self.running:
+                    warn(f"Attempt {retry + 1}/{attempts} failed: {e} — "
+                         f"retrying in {_human_duration(CONFIG['retry_delay'])}")
+                    self._sleep(CONFIG['retry_delay'])
+                else:
+                    raise
+
+    def unlike_posts(self, username: str, fingerprint: Optional[str] = None):
         global _active_bar
-        account_file = self.accounts_dir / f"{username}.json"
+        account_file = self._account_path(username)
         progress_bar = None
         resume = None
 
         if not account_file.exists():
-            error_msg = f"Account file not found for {username}"
-            fail(f"{error_msg}. Please add it first.", blank=True)
+            fail(f"Account file not found for {username}. Please add it first.", blank=True)
             return
 
         if not LIKED_POSTS_PATH.exists():
@@ -1010,23 +1097,24 @@ class InstagramUnliker:
                 account_data = json.load(f)
 
             mode = content_mode()
-            noun = CONTENT_NOUN[mode]
+            spec = CONTENT_MODES[mode]
+            noun = spec.noun
             header(f"Unliking {noun} for @{username}")
 
             following = self._load_following()
             if following:
-                note(f"Loaded {len(following)} followed accounts — their reels will be skipped")
+                note(f"Loaded {len(following)} followed accounts — their {noun} will be skipped")
 
-            if self.excluded_users:
-                note(f"Excluding {len(self.excluded_users)} manually excluded users")
+            excluded = self.excluded_users
+            if excluded:
+                note(f"Excluding {len(excluded)} manually excluded users")
 
             try:
                 client = self._login(account_data['username'])
                 account = client.private_info()
                 ok(f"Logged in as @{account.username}")
             except Exception as e:
-                error_msg = f"Login failed: {str(e)}"
-                fail(error_msg)
+                fail(f"Login failed: {e}")
                 note("Check your username and password")
                 return
 
@@ -1052,25 +1140,25 @@ class InstagramUnliker:
 
                     if post_username and post_username in following:
                         skipped_following += 1
-                        logging.debug(f"Skipping reel from followed account: @{post_username}")
+                        logging.debug(f"Skipping {_reel_code(url)} from followed account: @{post_username}")
                         continue
 
-                    if post_username and post_username in self.excluded_users:
+                    if post_username and post_username in excluded:
                         skipped_excluded += 1
-                        logging.debug(f"Skipping reel from excluded user: @{post_username}")
+                        logging.debug(f"Skipping {_reel_code(url)} from excluded user: @{post_username}")
                         continue
 
                     targets.append((post, url, post_username))
 
-                resume = ProgressStore(username, self._export_fingerprint())
+                resume = ProgressStore(username, fingerprint or self._export_fingerprint())
                 if resume.done:
                     targets = [entry for entry in targets if entry[1] not in resume.done]
                 already_done = len(resume.done)
                 total_posts = len(targets)
 
                 print(f"\n{ConsoleColors.BLUE}Filter summary:{ConsoleColors.RESET}")
-                print(f"  {ConsoleColors.GREEN}{CONTENT_TARGET_LABEL[mode]:<16}: {total_posts}{ConsoleColors.RESET}")
-                print(f"  {ConsoleColors.YELLOW}{CONTENT_SKIP_LABEL[mode]:<16}: {skipped_scope} (skipped){ConsoleColors.RESET}")
+                print(f"  {ConsoleColors.GREEN}{spec.target_label:<16}: {total_posts}{ConsoleColors.RESET}")
+                print(f"  {ConsoleColors.YELLOW}{spec.skip_label:<16}: {skipped_scope} (skipped){ConsoleColors.RESET}")
                 print(f"  {ConsoleColors.YELLOW}{'From following':<16}: {skipped_following} (skipped){ConsoleColors.RESET}")
                 if skipped_excluded:
                     print(f"  {ConsoleColors.YELLOW}{'Excluded users':<16}: {skipped_excluded} (skipped){ConsoleColors.RESET}")
@@ -1082,7 +1170,7 @@ class InstagramUnliker:
 
                 if total_posts == 0:
                     warn("Nothing left to unlike from this export" if already_done
-                         else "No reels to unlike after filtering")
+                         else f"No {noun} to unlike after filtering")
                     return
 
                 mean_delay = (CONFIG['delay']['min'] + CONFIG['delay']['max']) / 2
@@ -1116,19 +1204,7 @@ class InstagramUnliker:
                         if not self.running:
                             break
 
-                        media_id = instagram_code_to_media_id(url)
-
-                        for retry in range(CONFIG['max_retries']):
-                            try:
-                                client.unlike(media_id)
-                                break
-                            except Exception as e:
-                                if retry < CONFIG['max_retries'] - 1 and self.running:
-                                    warn(f"Attempt {retry + 1}/{CONFIG['max_retries']} failed: {e} — "
-                                         f"retrying in {_human_duration(CONFIG['retry_delay'])}")
-                                    self._sleep(CONFIG['retry_delay'])
-                                else:
-                                    raise
+                        self._unlike_with_retry(client, instagram_code_to_media_id(url))
 
                         unliked_count += 1
                         account_data['total_unliked'] += 1
@@ -1178,12 +1254,11 @@ class InstagramUnliker:
                 note(f"Left to do    : {remaining} — pick 4 again to resume where this stopped")
             
         except json.JSONDecodeError as e:
-            error_msg = f"Invalid JSON format: {str(e)}"
-            fail(f"{error_msg}")
+            fail(f"Invalid JSON format: {e}")
         except Exception as e:
-            error_msg = f"Unexpected error: {str(e)}"
+            error_msg = f"Unexpected error: {e}"
             logging.error(error_msg, exc_info=True)
-            fail(f"{error_msg}", blank=True)
+            fail(error_msg, blank=True)
 
     def show_menu(self):
         while True:
@@ -1272,7 +1347,7 @@ class InstagramUnliker:
         fingerprint = self._export_fingerprint() if LIKED_POSTS_PATH.exists() else None
 
         for i, acc in enumerate(accounts, 1):
-            account_file = self.accounts_dir / f"{acc}.json"
+            account_file = self._account_path(acc)
             status = "Ready"
             if account_file.exists():
                 with open(account_file, encoding='utf-8') as f:
@@ -1289,16 +1364,9 @@ class InstagramUnliker:
             print(f"{ConsoleColors.BOLD}{i}{ConsoleColors.RESET}. [{acc}] - {status}")
             
         try:
-            choice = input(f"\n{ConsoleColors.BOLD}Select account (0 to cancel): {ConsoleColors.RESET}")
-            if not choice.isdigit() or int(choice) == 0:
-                return
-                
-            choice = int(choice)
-            if choice < 1 or choice > len(accounts):
-                fail("Invalid selection")
-                return
-                
-            self.unlike_posts(accounts[choice - 1])
+            picked = self._pick(accounts, "Select account (0 to cancel)")
+            if picked is not None:
+                self.unlike_posts(picked, fingerprint)
             
         except ValueError:
             fail("Invalid input")
@@ -1316,7 +1384,7 @@ class InstagramUnliker:
         
         total_unliked = 0
         for username in accounts:
-            account_file = self.accounts_dir / f"{username}.json"
+            account_file = self._account_path(username)
             try:
                 with open(account_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
@@ -1337,82 +1405,47 @@ class InstagramUnliker:
 
     def show_settings(self):
         while True:
-            print(f"\n{ConsoleColors.CYAN}{ConsoleColors.BOLD}╔══════════════════════════════════╗")
-            print("║          Settings Menu           ║")
-            print(f"╚══════════════════════════════════╝{ConsoleColors.RESET}")
-            
-            print(f"\n{ConsoleColors.YELLOW}▸ Delay Settings{ConsoleColors.RESET}")
-            print(f"  {ConsoleColors.BOLD}1.{ConsoleColors.RESET} Minimum Delay     : {ConsoleColors.GREEN}{CONFIG['delay']['min']}{ConsoleColors.RESET} seconds")
-            print(f"  {ConsoleColors.BOLD}2.{ConsoleColors.RESET} Maximum Delay     : {ConsoleColors.GREEN}{CONFIG['delay']['max']}{ConsoleColors.RESET} seconds")
-            
-            print(f"\n{ConsoleColors.YELLOW}▸ Break Settings{ConsoleColors.RESET}")
-            print(f"  {ConsoleColors.BOLD}3.{ConsoleColors.RESET} Break Probability : {ConsoleColors.GREEN}{CONFIG['break']['probability'] * 100}%{ConsoleColors.RESET}")
-            print(f"  {ConsoleColors.BOLD}4.{ConsoleColors.RESET} Minimum Break     : {ConsoleColors.GREEN}{CONFIG['break']['min'] / 60:.1f}{ConsoleColors.RESET} minutes")
-            print(f"  {ConsoleColors.BOLD}5.{ConsoleColors.RESET} Maximum Break     : {ConsoleColors.GREEN}{CONFIG['break']['max'] / 60:.1f}{ConsoleColors.RESET} minutes")
-            
-            print(f"\n{ConsoleColors.YELLOW}▸ What to unlike{ConsoleColors.RESET}")
-            print(f"  {ConsoleColors.BOLD}8.{ConsoleColors.RESET} Content           : {ConsoleColors.GREEN}{content_mode()}{ConsoleColors.RESET}")
+            print(f"\n{ConsoleColors.CYAN}{ConsoleColors.BOLD}╔{'═' * 46}╗")
+            print(center_text_in_box(f"{ConsoleColors.BOLD}Settings Menu{ConsoleColors.RESET}"
+                                     f"{ConsoleColors.CYAN}{ConsoleColors.BOLD}"))
+            print(f"╚{'═' * 46}╝{ConsoleColors.RESET}")
 
-            print(f"\n{ConsoleColors.YELLOW}▸ Retry Settings{ConsoleColors.RESET}")
-            print(f"  {ConsoleColors.BOLD}6.{ConsoleColors.RESET} Maximum Retries   : {ConsoleColors.GREEN}{CONFIG['max_retries']}{ConsoleColors.RESET}")
-            print(f"  {ConsoleColors.BOLD}7.{ConsoleColors.RESET} Retry Delay       : {ConsoleColors.GREEN}{CONFIG['retry_delay']}{ConsoleColors.RESET} seconds")
-            
+            group = None
+            for number, setting in enumerate(SETTINGS, 1):
+                if setting.group != group:
+                    group = setting.group
+                    print(f"\n{ConsoleColors.YELLOW}▸ {group}{ConsoleColors.RESET}")
+                unit = f" {setting.unit}" if setting.unit else ""
+                print(f"  {ConsoleColors.BOLD}{number}.{ConsoleColors.RESET} {setting.label:<18}: "
+                      f"{ConsoleColors.GREEN}{setting.show()}{ConsoleColors.RESET}{unit}")
+
             print(f"\n{ConsoleColors.CYAN}▸ Navigation{ConsoleColors.RESET}")
             print(f"  {ConsoleColors.BOLD}0.{ConsoleColors.RESET} Save and Return")
-            
+
             try:
                 print(f"\n{ConsoleColors.WHITE}╭─{ConsoleColors.RESET}")
                 choice = input(f"{ConsoleColors.WHITE}╰─▸{ConsoleColors.RESET} ").strip()
-                
+
                 if choice == "0":
                     ok("Settings saved successfully!", blank=True)
                     time.sleep(1)
                     break
-                    
+
+                if not choice.isdigit() or not 1 <= int(choice) <= len(SETTINGS):
+                    fail("Invalid choice", blank=True)
+                    time.sleep(1)
+                    continue
+
+                setting = SETTINGS[int(choice) - 1]
                 try:
-                    if choice in ["1", "2", "3", "4", "5", "6", "7", "8"]:
-                        print(f"{ConsoleColors.WHITE}╭─{ConsoleColors.RESET}")
-                        
-                        if choice == "1":
-                            new_value = float(input(f"{ConsoleColors.WHITE}╰─▸ Enter new minimum delay (seconds): {ConsoleColors.RESET}"))
-                            CONFIG['delay']['min'] = new_value
-                        elif choice == "2":
-                            new_value = float(input(f"{ConsoleColors.WHITE}╰─▸ Enter new maximum delay (seconds): {ConsoleColors.RESET}"))
-                            CONFIG['delay']['max'] = new_value
-                        elif choice == "3":
-                            new_value = float(input(f"{ConsoleColors.WHITE}╰─▸ Enter new break probability (0-1): {ConsoleColors.RESET}"))
-                            if 0 <= new_value <= 1:
-                                CONFIG['break']['probability'] = new_value
-                            else:
-                                raise ValueError("Probability must be between 0 and 1")
-                        elif choice == "4":
-                            new_value = float(input(f"{ConsoleColors.WHITE}╰─▸ Enter new minimum break time (minutes): {ConsoleColors.RESET}"))
-                            CONFIG['break']['min'] = new_value * 60
-                        elif choice == "5":
-                            new_value = float(input(f"{ConsoleColors.WHITE}╰─▸ Enter new maximum break time (minutes): {ConsoleColors.RESET}"))
-                            CONFIG['break']['max'] = new_value * 60
-                        elif choice == "6":
-                            new_value = int(input(f"{ConsoleColors.WHITE}╰─▸ Enter new maximum retries: {ConsoleColors.RESET}"))
-                            CONFIG['max_retries'] = new_value
-                        elif choice == "7":
-                            new_value = int(input(f"{ConsoleColors.WHITE}╰─▸ Enter new retry delay (seconds): {ConsoleColors.RESET}"))
-                            CONFIG['retry_delay'] = new_value
-                        elif choice == "8":
-                            print(f"{ConsoleColors.WHITE}│  1. reels  2. posts  3. both{ConsoleColors.RESET}")
-                            picked = {'1': 'reels', '2': 'posts', '3': 'both'}.get(
-                                input(f"{ConsoleColors.WHITE}╰─▸ Unlike which content? {ConsoleColors.RESET}").strip())
-                            if not picked:
-                                raise ValueError("Pick 1, 2 or 3")
-                            CONFIG['content'] = picked
-                            
-                        self.save_config()
-                        ok("Setting updated successfully!", blank=True)
-                        time.sleep(1)
-                    else:
-                        fail("Invalid choice", blank=True)
-                        time.sleep(1)
+                    print(f"{ConsoleColors.WHITE}╭─{ConsoleColors.RESET}")
+                    raw = input(f"{ConsoleColors.WHITE}╰─▸ {setting.prompt}: {ConsoleColors.RESET}")
+                    _cfg_set(setting.path, setting.parse(raw))
+                    self.save_config()
+                    ok("Setting updated successfully!", blank=True)
+                    time.sleep(1)
                 except ValueError as e:
-                    fail(f"Invalid input: {str(e)}", blank=True)
+                    fail(f"Invalid input: {e}", blank=True)
                     time.sleep(2)
             except KeyboardInterrupt:
                 break
