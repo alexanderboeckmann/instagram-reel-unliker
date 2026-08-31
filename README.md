@@ -49,7 +49,6 @@ That's it — you don't have to unpack it or move anything by hand. See [Importi
 ### 2. Install
 
 ```bash
-chmod +x run.sh
 ./run.sh
 ```
 
@@ -158,7 +157,7 @@ If the `keyring` package or a usable backend is missing, nothing is persisted an
 
 ## Long runs
 
-At the default 5–15 second delay, a large backlog takes **days**, not hours — roughly 10 seconds per reel, plus a 5-minute cooldown after any failure.
+At the default 20–100 second delay, a large backlog takes **days**, not hours — roughly 80 seconds per reel once the occasional long break is averaged in, so a 5,000-reel backlog runs for about five days. Any failure adds a 5-minute cooldown on top.
 
 The menu is interactive, so it can't be backgrounded with `nohup`. Use `screen`, which ships with macOS:
 
@@ -183,10 +182,10 @@ Each reel is appended to `data/progress/<username>.txt` and flushed the moment i
 
 ```
 Filter summary:
-  Reels to unlike : 4,812
-  Non-reel posts  : 26,113 (skipped)
+  Reels to unlike : 4812
+  Non-reel posts  : 26113 (skipped)
   From following  : 884 (skipped)
-  Done earlier    : 1,204 (resuming)
+  Done earlier    : 1204 (resuming)
 ```
 
 The account picker shows the same count, so you can see how far along you are before starting. Reels that *failed* are deliberately not recorded — they come back around on the next run.
@@ -207,8 +206,8 @@ Removing the account with menu option **2** deletes it too.
 
 ```json
 {
-    "delay":   { "min": 5.0, "max": 15.0 },
-    "break":   { "min": 300.0, "max": 900.0, "probability": 0.001 },
+    "delay":   { "min": 20, "max": 100 },
+    "break":   { "min": 900, "max": 3600, "probability": 0.01 },
     "accounts": {
         "your_username": { "enabled": true, "delay_multiplier": 1.0 }
     },
@@ -222,7 +221,8 @@ Removing the account with menu option **2** deletes it too.
 - **`delay`** — seconds between unlikes, randomised in this range. Lower is faster and more conspicuous.
 - **`break`** — with `probability` per reel, pause for a random duration in this range.
 - **`delay_multiplier`** — per-account scaling of the delay.
-- **`excluded_users`** — usernames never touched, on top of the automatic follow-filter. Edit via menu option **4**.
+- **`excluded_users`** — usernames never touched, on top of the automatic follow-filter. Edit via menu option **5**.
+- **`log_level`** — verbosity of `logs/unliker.log`. `DEBUG` also records why each individual reel was skipped; `WARNING` keeps the log to problems only.
 
 ## Known limitations
 
@@ -230,7 +230,7 @@ Removing the account with menu option **2** deletes it too.
 - **No 2FA support.** There is no prompt for a verification code; login will fail if two-factor is enabled on the account.
 - **Rate limiting is a deterrent, not a guarantee.** Random delays and breaks reduce how mechanical the traffic looks. They do not make it invisible, and they are no protection against an action block.
 - **Windows is not supported.** The launchers are bash and the fork is developed on macOS; Linux should work but is untested.
-- **`ensta` is installed without three of its dependencies.** `ensta` 5.2.9 imports `moviepy.editor`, `PIL.Image` and `pyquery` at module scope, but only reaches them when uploading video (`WebSession.py:942`, `:987`) or scraping a single post (`:661`) — neither of which this tool does. `run.sh` therefore uninstalls `moviepy`, `imageio`, `imageio-ffmpeg`, `numpy`, `pillow`, `pyquery` and `lxml` after the install, and `instagram_unliker.py` puts stubs in `sys.modules` so the imports still resolve. This takes `venv/` from 156M to 34M. The stubs raise a named `RuntimeError` if those paths are ever actually entered, and they stand down automatically if the real packages are present. It also means no FFmpeg is needed, and no `moviepy<2.0` pin: the version stopped mattering once nothing imports it.
+- **`ensta` is installed without three of its dependencies.** `ensta` 5.2.9 imports `moviepy.editor`, `PIL.Image` and `pyquery` at module scope, but only reaches them when uploading video (`WebSession.py:942`, `:987`) or scraping a single post (`:661`) — neither of which this tool does. `run.sh` therefore uninstalls `moviepy`, `imageio`, `imageio-ffmpeg`, `numpy`, `pillow`, `pyquery`, `lxml`, `proglog`, `python-dotenv`, `decorator` and `cssselect` after the install, and `instagram_unliker.py` puts stubs in `sys.modules` so the imports still resolve. This takes `venv/` from 156M to 34M. The stubs raise a named `RuntimeError` if those paths are ever actually entered, and they stand down automatically if the real packages are present. It also means no FFmpeg is needed, and no `moviepy<2.0` pin: the version stopped mattering once nothing imports it.
 
 ## License
 

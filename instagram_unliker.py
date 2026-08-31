@@ -215,7 +215,7 @@ class InstagramUnliker:
         self.config_file = BASE_DIR / "config.json"
         self.accounts_dir = BASE_DIR / "accounts"
         self.logs_dir = BASE_DIR / "logs"
-        self.running = True
+        self.running = False
         self.excluded_users: Set[str] = set()
 
         self.setup_logging()
@@ -227,6 +227,7 @@ class InstagramUnliker:
         self._create_required_directories()
         self._setup_signal_handlers()
         self.check_and_create_config()
+        self._apply_log_level()
         self._load_excluded_users()
         self._migrate_credentials()
         
@@ -291,10 +292,18 @@ class InstagramUnliker:
         signal.signal(signal.SIGTERM, self._handle_shutdown)
         
     def _handle_shutdown(self, signum, frame):
-        warn("Received shutdown signal. Cleaning up...", blank=True)
+        if not self.running:
+            sys.exit(0)
         self.running = False
-        time.sleep(1)
-        sys.exit(0)
+        warn("Stopping — finishing up, progress is saved.", blank=True)
+
+    def _sleep(self, seconds: float):
+        end = time.monotonic() + seconds
+        while self.running:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.5, remaining))
         
     def setup_logging(self):
         self.logs_dir.mkdir(exist_ok=True)
@@ -311,14 +320,34 @@ class InstagramUnliker:
             '%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s',
             datefmt=LOG_DATEFMT
         ))
-        file_handler.setLevel(logging.INFO)
+        level = self._level_from_config_file()
+        file_handler.setLevel(level)
 
         root_logger = logging.getLogger()
-        root_logger.setLevel(logging.INFO)
+        root_logger.setLevel(level)
         root_logger.handlers.clear()
         root_logger.addHandler(file_handler)
 
         atexit.register(self._cleanup_logs)
+
+    def _level_from_config_file(self) -> int:
+        try:
+            name = json.loads(self.config_file.read_text(encoding='utf-8'))['log_level']
+        except Exception:
+            name = CONFIG['log_level']
+        level = getattr(logging, str(name).upper(), None)
+        return level if isinstance(level, int) else logging.INFO
+
+    def _apply_log_level(self):
+        name = str(CONFIG.get('log_level', 'INFO')).upper()
+        level = getattr(logging, name, None)
+        if not isinstance(level, int):
+            warn(f"Unknown log_level {name} in config.json — using INFO")
+            level = logging.INFO
+        root_logger = logging.getLogger()
+        root_logger.setLevel(level)
+        for handler in root_logger.handlers:
+            handler.setLevel(level)
         
     def _cleanup_logs(self):
         try:
@@ -340,7 +369,8 @@ class InstagramUnliker:
             logging.error(f"Failed to create directories: {str(e)}")
             print("Please ensure you have write permissions in the current directory")
 
-    def check_python_version(self) -> bool:
+    @staticmethod
+    def check_python_version() -> bool:
         version = sys.version_info
         if version.major < 3 or (version.major == 3 and version.minor < 10):
             fail(f"Python 3.10 or higher required (current: {version.major}.{version.minor})")
@@ -977,6 +1007,7 @@ class InstagramUnliker:
 
                 unliked_count = 0
                 failed_urls: list = []
+                self.running = True
 
                 progress_bar = tqdm(
                     total=total_posts,
@@ -990,7 +1021,9 @@ class InstagramUnliker:
                     try:
                         base_delay = random.uniform(CONFIG['delay']['min'], CONFIG['delay']['max'])
                         actual_delay = base_delay * CONFIG['accounts'].get(username, {}).get('delay_multiplier', 1.0)
-                        time.sleep(actual_delay)
+                        self._sleep(actual_delay)
+                        if not self.running:
+                            break
 
                         media_id = instagram_code_to_media_id(url)
 
@@ -1001,8 +1034,8 @@ class InstagramUnliker:
                             except Exception as e:
                                 error_msg = f"Failed to unlike reel (attempt {retry + 1}/{CONFIG['max_retries']}): {str(e)}"
                                 logging.warning(error_msg)
-                                if retry < CONFIG['max_retries'] - 1:
-                                    time.sleep(CONFIG['retry_delay'])
+                                if retry < CONFIG['max_retries'] - 1 and self.running:
+                                    self._sleep(CONFIG['retry_delay'])
                                 else:
                                     raise Exception(error_msg)
 
@@ -1014,7 +1047,7 @@ class InstagramUnliker:
                         if random.random() < CONFIG['break']['probability']:
                             break_time = random.uniform(CONFIG['break']['min'], CONFIG['break']['max'])
                             progress_bar.write(f"{ConsoleColors.BLUE}· Taking a break for {break_time/60:.1f} minutes...{ConsoleColors.RESET}")
-                            time.sleep(break_time)
+                            self._sleep(break_time)
 
                     except Exception as e:
                         error_msg = f"Failed to unlike reel {url}: {str(e)}"
@@ -1022,9 +1055,10 @@ class InstagramUnliker:
                         progress_bar.write(f"{ConsoleColors.RED}✗ {error_msg}{ConsoleColors.RESET}")
                         account_data['last_error'] = error_msg
                         failed_urls.append(url)
-                        time.sleep(300)
+                        self._sleep(300)
 
             finally:
+                self.running = False
                 if progress_bar is not None:
                     progress_bar.close()
                 if resume is not None:
@@ -1307,11 +1341,10 @@ def parse_args():
 def main():
     try:
         args = parse_args()
-        unliker = InstagramUnliker()
-        if not unliker.check_python_version():
+        if not InstagramUnliker.check_python_version():
             sys.exit(1)
 
-        signal.signal(signal.SIGINT, lambda sig, frame: sys.exit(0))
+        unliker = InstagramUnliker()
 
         if args.import_path:
             unliker.import_export(InstagramUnliker._resolve_dropped_path(args.import_path))
