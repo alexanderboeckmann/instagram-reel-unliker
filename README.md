@@ -4,7 +4,7 @@
 
 <div align="center">
 
-[![Python Version](https://img.shields.io/badge/python-3.7%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Open Source](https://img.shields.io/badge/Open%20Source-%E2%9D%A4-red)](https://github.com/alexanderboeckmann/instagram-reel-unliker)
 
@@ -190,7 +190,7 @@ tail -f logs/unliker.log
     "max_retries": 3,
     "retry_delay": 60,
     "auto_update": true,
-    "python_min_version": "3.7.0"
+    "python_min_version": "3.10.0"
 }
 ```
 

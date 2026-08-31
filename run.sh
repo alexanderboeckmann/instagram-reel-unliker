@@ -34,8 +34,8 @@ if ! command -v python3 &> /dev/null; then
     exit 1
 fi
 
-python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,7) else 1)" || {
-    echo -e "${RED}[!] Python 3.7 or higher required${NC}"
+python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" || {
+    echo -e "${RED}[!] Python 3.10 or higher required${NC}"
     exit 1
 }
 
