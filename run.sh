@@ -72,6 +72,10 @@ python -m pip install --no-cache-dir -r requirements.txt || {
     echo -e "${RED}[!] Failed to install Python dependencies${NC}"
     exit 1
 }
+
+# ensta pulls these in but never reaches them; instagram_unliker.py stubs the imports. See README.
+python -m pip uninstall -y -q moviepy imageio imageio-ffmpeg numpy pillow pyquery lxml \
+    proglog python-dotenv decorator cssselect
 echo -e "${GREEN}[✓] All dependencies installed successfully${NC}"
 echo
 

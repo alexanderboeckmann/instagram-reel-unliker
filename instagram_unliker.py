@@ -5,18 +5,15 @@ import json
 import time
 import random
 import logging
-import platform
-import subprocess
 import shutil
-import threading
-from datetime import datetime, timedelta
+import types
+import importlib.util
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple, Set
+from typing import Optional, List, Tuple, Set
 from getpass import getpass
-import webbrowser
 import signal
 from tqdm import tqdm
-import urllib.request
 import tempfile
 import shlex
 import zipfile
@@ -30,7 +27,6 @@ DATA_DIR = BASE_DIR / "data"
 LIKED_POSTS_PATH = DATA_DIR / "liked_posts.json"
 FOLLOWING_PATH = DATA_DIR / "following.json"
 IMPORT_META_PATH = DATA_DIR / "import_meta.json"
-REQUIREMENTS_PATH = BASE_DIR / "requirements.txt"
 EXPORT_SEARCH_DIRS = [Path.home() / "Downloads", Path.home() / "Desktop", BASE_DIR]
 
 LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
@@ -55,10 +51,29 @@ CONFIG = {
     "excluded_users": [],
     "log_level": "INFO",
     "max_retries": 3,
-    "retry_delay": 60,
-    "auto_update": True,
-    "python_min_version": "3.10.0"
+    "retry_delay": 60
 }
+
+def _stub_unused_ensta_deps():
+    def gone(what):
+        def raise_(*args, **kwargs):
+            raise RuntimeError(f"{what} requires a dependency this install omits")
+        return raise_
+
+    def mod(name, **attrs):
+        m = types.ModuleType(name)
+        m.__dict__.update(attrs)
+        sys.modules[name] = m
+        return m
+
+    if importlib.util.find_spec("moviepy") is None:
+        mod("moviepy").editor = mod("moviepy.editor", VideoFileClip=gone("VideoFileClip"))
+    if importlib.util.find_spec("PIL") is None:
+        mod("PIL").Image = mod("PIL.Image", fromarray=gone("PIL.Image.fromarray"))
+    if importlib.util.find_spec("pyquery") is None:
+        mod("pyquery", PyQuery=gone("PyQuery"))
+
+_stub_unused_ensta_deps()
 
 class ConsoleColors:
     HEADER = '\033[95m'
@@ -165,7 +180,6 @@ class InstagramUnliker:
             warn("No keychain available — you will be asked for your password every run")
 
         self._create_required_directories()
-        self._ensure_python_environment()
         self._setup_signal_handlers()
         self.check_and_create_config()
         self._load_excluded_users()
@@ -227,26 +241,6 @@ class InstagramUnliker:
         self.excluded_users = set(CONFIG.get('excluded_users', []))
         logging.info(f"Loaded {len(self.excluded_users)} excluded users")
         
-    def _ensure_python_environment(self):
-        try:
-            import pip
-        except ImportError:
-            logging.warning("pip is not installed. Installing pip...")
-            self._install_pip()
-            
-    def _install_pip(self):
-        try:
-            import urllib.request
-            with tempfile.TemporaryDirectory() as tmp:
-                bootstrap = os.path.join(tmp, "get-pip.py")
-                urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", bootstrap)
-                subprocess.check_call([sys.executable, bootstrap])
-            logging.info("Successfully installed pip")
-        except Exception as e:
-            logging.error(f"Failed to install pip: {str(e)}")
-            print("Please visit https://pip.pypa.io/en/stable/installation/ for manual installation instructions")
-            sys.exit(1)
-            
     def _setup_signal_handlers(self):
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
@@ -308,24 +302,6 @@ class InstagramUnliker:
             return False
         logging.info(f"Python {version.major}.{version.minor}")
         return True
-
-    def install_requirements(self) -> bool:
-        try:
-            result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--force-reinstall", "-r", str(REQUIREMENTS_PATH)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE)
-
-            if result.returncode != 0:
-                fail(f"Failed to install dependencies. Error: {result.stderr.decode()}")
-                return False
-
-            ok("Successfully installed dependencies")
-            return True
-            
-        except Exception as e:
-            fail(f"Installation error: {str(e)}")
-            return False
 
     def check_and_create_config(self):
         if not os.path.exists(self.config_file):
@@ -440,10 +416,10 @@ class InstagramUnliker:
                 print(f"\n{ConsoleColors.YELLOW}No users excluded yet{ConsoleColors.RESET}")
             
             print(f"\n{ConsoleColors.CYAN}Options:{ConsoleColors.RESET}")
-            print(f"  1. Add user to exclude list")
-            print(f"  2. Remove user from exclude list")
-            print(f"  3. Clear all excluded users")
-            print(f"  0. Back to main menu")
+            print("  1. Add user to exclude list")
+            print("  2. Remove user from exclude list")
+            print("  3. Clear all excluded users")
+            print("  0. Back to main menu")
             
             choice = input(f"\n{ConsoleColors.BOLD}Select option: {ConsoleColors.RESET}").strip()
             
@@ -541,7 +517,6 @@ class InstagramUnliker:
             if num < 1024 or unit == 'GB':
                 return f"{num:.0f} {unit}" if unit == 'B' else f"{num:.1f} {unit}"
             num /= 1024.0
-        return f"{num:.1f} GB"
 
     @staticmethod
     def _discover_exports() -> List[Path]:
@@ -652,14 +627,12 @@ class InstagramUnliker:
         except json.JSONDecodeError as e:
             raise ValueError(f"Could not read {path.name} as JSON: {e}")
 
-        if isinstance(raw, dict):
-            raw = raw.get('likes_media_likes', [])
-        if not isinstance(raw, list) or not raw:
+        records = self._liked_records(raw)
+        if not isinstance(records, list) or not records:
             raise ValueError(f"{path.name} contains no liked posts")
 
         total = reels = 0
-        for post in raw:
-            url, _ = self._parse_liked_post(post)
+        for _, url, _ in self._liked_entries(records):
             if not url:
                 continue
             total += 1
@@ -667,7 +640,7 @@ class InstagramUnliker:
                 reels += 1
         if total == 0:
             raise ValueError(
-                f"{path.name} has {len(raw)} entries but no readable post URLs — "
+                f"{path.name} has {len(records)} entries but no readable post URLs — "
                 "Instagram's export format may have changed."
             )
         return total, reels
@@ -848,6 +821,16 @@ class InstagramUnliker:
             pass
         return url, post_username
 
+    @staticmethod
+    def _liked_records(raw):
+        return raw.get('likes_media_likes', []) if isinstance(raw, dict) else raw
+
+    @classmethod
+    def _liked_entries(cls, records):
+        for post in records:
+            url, post_username = cls._parse_liked_post(post)
+            yield post, url, post_username
+
     def unlike_posts(self, username: str):
         account_file = self.accounts_dir / f"{username}.json"
         progress_bar = None
@@ -889,10 +872,9 @@ class InstagramUnliker:
                 with open(LIKED_POSTS_PATH, 'r', encoding='utf-8') as f:
                     raw_posts = json.load(f)
 
-                if isinstance(raw_posts, dict):
-                    raw_posts = raw_posts.get('likes_media_likes', [])
+                records = self._liked_records(raw_posts)
 
-                if not raw_posts:
+                if not records:
                     warn("No liked posts found in liked_posts.json")
                     return
 
@@ -901,9 +883,7 @@ class InstagramUnliker:
                 skipped_following = 0
                 skipped_excluded = 0
 
-                for post in raw_posts:
-                    url, post_username = self._parse_liked_post(post)
-
+                for post, url, post_username in self._liked_entries(records):
                     if not url or '/reel/' not in url:
                         skipped_not_reel += 1
                         continue
@@ -1001,16 +981,11 @@ class InstagramUnliker:
             logging.error(error_msg, exc_info=True)
             fail(f"{error_msg}", blank=True)
 
-    def center_text_in_box(text, box_width=48):
-        visible_length = get_visible_length(text)
-        padding = (box_width - 2 - visible_length) // 2
-        return f"║{' ' * padding}{text}{' ' * (box_width - 2 - visible_length - padding)}║"
-
     def show_menu(self):
         while True:
             print(f"\n{ConsoleColors.CYAN}{ConsoleColors.BOLD}╔{'═' * 46}╗")
-            print(InstagramUnliker.center_text_in_box(f"{ConsoleColors.BOLD}Instagram Mass Unliker{ConsoleColors.RESET}{ConsoleColors.CYAN}{ConsoleColors.BOLD}"))
-            print(InstagramUnliker.center_text_in_box(f"{ConsoleColors.BOLD}Erase your digital footprint{ConsoleColors.RESET}{ConsoleColors.CYAN}{ConsoleColors.BOLD}"))
+            print(center_text_in_box(f"{ConsoleColors.BOLD}Instagram Mass Unliker{ConsoleColors.RESET}{ConsoleColors.CYAN}{ConsoleColors.BOLD}"))
+            print(center_text_in_box(f"{ConsoleColors.BOLD}Erase your digital footprint{ConsoleColors.RESET}{ConsoleColors.CYAN}{ConsoleColors.BOLD}"))
             print(f"╚{'═' * 46}╝{ConsoleColors.RESET}")
             
             accounts = self.list_accounts()
@@ -1097,7 +1072,7 @@ class InstagramUnliker:
                 with open(account_file, encoding='utf-8') as f:
                     data = json.load(f)
                     if data.get('last_error'):
-                        status = f"Error"
+                        status = "Error"
                     elif data.get('last_run'):
                         status = f"Last: {datetime.fromisoformat(data['last_run']).strftime('%Y-%m-%d %H:%M')}"
             
@@ -1142,7 +1117,7 @@ class InstagramUnliker:
                 if data.get('last_run'):
                     print(f"  Last active: {datetime.fromisoformat(data['last_run']).strftime('%Y-%m-%d %H:%M')}")
                 fail("Status: Error") if data.get('last_error') else ok("Status: OK")
-            except Exception as e:
+            except Exception:
                 fail(f"Could not read data for {username}")
                 
         ok(f"Total unliked: {total_unliked} posts", blank=True)
@@ -1153,7 +1128,7 @@ class InstagramUnliker:
     def show_settings(self):
         while True:
             print(f"\n{ConsoleColors.CYAN}{ConsoleColors.BOLD}╔══════════════════════════════════╗")
-            print(f"║          Settings Menu           ║")
+            print("║          Settings Menu           ║")
             print(f"╚══════════════════════════════════╝{ConsoleColors.RESET}")
             
             print(f"\n{ConsoleColors.YELLOW}▸ Delay Settings{ConsoleColors.RESET}")
@@ -1222,44 +1197,19 @@ class InstagramUnliker:
             except KeyboardInterrupt:
                 break
 
-    def check_system_requirements(self) -> bool:
-        logging.info(f"Operating System: {platform.system()}")
-        return True
-
-    def check_dependencies(self) -> bool:
-        try:
-            import importlib.util
-            
-            ensta_spec = importlib.util.find_spec("ensta")
-            if ensta_spec is None:
-                fail("ensta library not found")
-                note("Attempting to reinstall...")
-                self.install_requirements()
-                return False
-                
-            try:
-                import ensta
-                logging.info("Successfully imported ensta")
-                return True
-            except Exception as e:
-                logging.error(f"Error importing ensta: {str(e)}", exc_info=True)
-                fail("Error importing ensta")
-                note("Attempting to fix by reinstalling...")
-                self.install_requirements()
-                return False
-        except Exception as e:
-            logging.error(f"Dependency check failed: {str(e)}", exc_info=True)
-            return False
-
 def instagram_code_to_media_id(code):
     charmap = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
     code = code.split('/')[-2]
     return sum(charmap.index(char) * (64 ** i) for i, char in enumerate(reversed(code)))
 
 def get_visible_length(text):
-    import re
     ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     return len(ansi_escape.sub('', text))
+
+def center_text_in_box(text, box_width=48):
+    visible_length = get_visible_length(text)
+    padding = (box_width - 2 - visible_length) // 2
+    return f"║{' ' * padding}{text}{' ' * (box_width - 2 - visible_length - padding)}║"
 
 def menu_line(number, text, box_width=40):
     prefix = f"│ {ConsoleColors.BOLD}{number}.{ConsoleColors.RESET} {ConsoleColors.WHITE}"
@@ -1284,18 +1234,10 @@ def main():
     try:
         args = parse_args()
         unliker = InstagramUnliker()
-        if not unliker.check_dependencies():
-            print("Error: Failed to install required dependencies.")
-            sys.exit(1)
-        
-        if not unliker.check_system_requirements():
-            print("Error: System requirements not met.")
-            sys.exit(1)
-        
-        signal.signal(signal.SIGINT, lambda sig, frame: sys.exit(0))
-        
         if not unliker.check_python_version():
             sys.exit(1)
+
+        signal.signal(signal.SIGINT, lambda sig, frame: sys.exit(0))
 
         if args.import_path:
             unliker.import_export(InstagramUnliker._resolve_dropped_path(args.import_path))

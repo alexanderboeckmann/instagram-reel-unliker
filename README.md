@@ -190,9 +190,7 @@ tail -f logs/unliker.log
     "excluded_users": [],
     "log_level": "INFO",
     "max_retries": 3,
-    "retry_delay": 60,
-    "auto_update": true,
-    "python_min_version": "3.10.0"
+    "retry_delay": 60
 }
 ```
 
@@ -208,8 +206,7 @@ tail -f logs/unliker.log
 - **No 2FA support.** There is no prompt for a verification code; login will fail if two-factor is enabled on the account.
 - **Rate limiting is a deterrent, not a guarantee.** Random delays and breaks reduce how mechanical the traffic looks. They do not make it invisible, and they are no protection against an action block.
 - **Windows is not supported.** The launchers are bash and the fork is developed on macOS; Linux should work but is untested.
-- **FFmpeg is not installed** by `run.sh`. It isn't needed for unliking; `moviepy` is only pulled in as an `ensta` dependency.
-- **`moviepy<2.0` in `requirements.txt` is a load-bearing pin, not cruft.** `ensta` 5.2.9 does `import moviepy.editor`, a module removed in moviepy 2.0. Unpinning it makes `import ensta` fail outright.
+- **`ensta` is installed without three of its dependencies.** `ensta` 5.2.9 imports `moviepy.editor`, `PIL.Image` and `pyquery` at module scope, but only reaches them when uploading video (`WebSession.py:942`, `:987`) or scraping a single post (`:661`) — neither of which this tool does. `run.sh` therefore uninstalls `moviepy`, `imageio`, `imageio-ffmpeg`, `numpy`, `pillow`, `pyquery` and `lxml` after the install, and `instagram_unliker.py` puts stubs in `sys.modules` so the imports still resolve. This takes `venv/` from 156M to 34M. The stubs raise a named `RuntimeError` if those paths are ever actually entered, and they stand down automatically if the real packages are present. It also means no FFmpeg is needed, and no `moviepy<2.0` pin: the version stopped mattering once nothing imports it.
 
 ## License
 
