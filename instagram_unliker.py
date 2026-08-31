@@ -21,14 +21,12 @@ import tempfile
 from logging.handlers import RotatingFileHandler
 import atexit
 
-# Global logging configuration
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-# Global variables for configuration
 CONFIG = {
     "delay": {
         "min": 20,
@@ -40,7 +38,7 @@ CONFIG = {
         "probability": 0.01
     },
     "accounts": {},
-    "excluded_users": [],  # NEW: List of usernames to exclude
+    "excluded_users": [],
     "log_level": "INFO",
     "max_retries": 3,
     "retry_delay": 60,
@@ -113,7 +111,6 @@ class SessionStore:
 
 class InstagramUnliker: 
     def __init__(self):
-        """Initialize the Instagram Unliker application"""
         logging.info("Starting Instagram Unliker application...")
         
         self.config_file = "config.json"
@@ -186,12 +183,10 @@ class InstagramUnliker:
         return Web(username, password, load=lambda: "", save=saver)
 
     def _load_excluded_users(self):
-        """Load excluded users from config"""
         self.excluded_users = set(CONFIG.get('excluded_users', []))
         logging.info(f"Loaded {len(self.excluded_users)} excluded users")
         
     def _ensure_python_environment(self):
-        """Ensure Python and pip are properly installed"""
         try:
             import pip
         except ImportError:
@@ -199,7 +194,6 @@ class InstagramUnliker:
             self._install_pip()
             
     def _install_pip(self):
-        """Install pip if not present"""
         try:
             import urllib.request
             urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", "get-pip.py")
@@ -212,19 +206,16 @@ class InstagramUnliker:
             sys.exit(1)
             
     def _setup_signal_handlers(self):
-        """Set up handlers for graceful shutdown"""
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
         
     def _handle_shutdown(self, signum, frame):
-        """Handle shutdown signals gracefully"""
         print(f"\n{ConsoleColors.YELLOW}[!] Received shutdown signal. Cleaning up...{ConsoleColors.RESET}")
         self.running = False
         time.sleep(1)
         sys.exit(0)
         
     def setup_logging(self):
-        """Configure logging with enhanced rotation and cleanup"""
         self.logs_dir = Path("logs")
         self.logs_dir.mkdir(exist_ok=True)
         
@@ -259,7 +250,6 @@ class InstagramUnliker:
         logging.info("Logging system initialized")
         
     def _cleanup_logs(self):
-        """Cleanup function that runs on program exit"""
         try:
             logging.info("Performing final cleanup...")
             self.save_config()
@@ -269,7 +259,6 @@ class InstagramUnliker:
             print(f"Error during cleanup: {str(e)}")
 
     def _create_required_directories(self):
-        """Create necessary directories if they don't exist"""
         try:
             self.accounts_dir.mkdir(exist_ok=True)
             os.chmod(self.accounts_dir, 0o700)
@@ -280,7 +269,6 @@ class InstagramUnliker:
             print("Please ensure you have write permissions in the current directory")
 
     def check_python_version(self) -> bool:
-        """Verify Python version meets requirements"""
         version = sys.version_info
         if version.major < 3 or (version.major == 3 and version.minor < 7):
             print(f"{ConsoleColors.RED}[✗] Error: Python 3.7 or higher required (current: {version.major}.{version.minor}){ConsoleColors.RESET}")
@@ -289,7 +277,6 @@ class InstagramUnliker:
         return True
 
     def install_requirements(self) -> bool:
-        """Install required Python packages with detailed error handling"""
         try:
             subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "ensta"], 
                           stdout=subprocess.PIPE, 
@@ -314,7 +301,6 @@ class InstagramUnliker:
             return False
 
     def check_and_create_config(self):
-        """Create or load configuration file"""
         if not os.path.exists(self.config_file):
             with open(self.config_file, 'w') as f:
                 json.dump(CONFIG, f, indent=4)
@@ -335,7 +321,6 @@ class InstagramUnliker:
                 self.check_and_create_config()
 
     def add_account(self):
-        """Add account with improved UI"""
         print(f"\n{ConsoleColors.CYAN}➕ Add Instagram Account{ConsoleColors.RESET}")
         print("-" * 40)
         
@@ -353,8 +338,7 @@ class InstagramUnliker:
             override = input(f"{ConsoleColors.YELLOW}Account exists. Replace? (y/N): {ConsoleColors.RESET}").lower()
             if override != 'y':
                 return
-            self.sessions.delete(username)
-        
+
         account_data = {
             "username": username,
             "last_run": None,
@@ -378,7 +362,6 @@ class InstagramUnliker:
             print(f"{ConsoleColors.RED}Could not save account: {str(e)}{ConsoleColors.RESET}")
 
     def remove_account(self):
-        """Remove an Instagram account"""
         accounts = self.list_accounts()
         if not accounts:
             print(f"{ConsoleColors.YELLOW}[!] No accounts configured{ConsoleColors.RESET}")
@@ -421,7 +404,6 @@ class InstagramUnliker:
             print(f"{ConsoleColors.RED}[✗] Error: {str(e)}{ConsoleColors.RESET}")
 
     def manage_excluded_users(self):
-        """Manage excluded users list"""
         while True:
             print(f"\n{ConsoleColors.CYAN}🚫 Manage Excluded Users{ConsoleColors.RESET}")
             print("=" * 50)
@@ -480,13 +462,11 @@ class InstagramUnliker:
             time.sleep(1)
 
     def list_accounts(self) -> List[str]:
-        """List all configured accounts"""
         if not self.accounts_dir.exists():
             return []
         return [f.stem for f in self.accounts_dir.glob("*.json")]
 
     def save_config(self):
-        """Save current configuration"""
         try:
             with open(self.config_file, 'w') as f:
                 json.dump(CONFIG, f, indent=4)
@@ -494,7 +474,6 @@ class InstagramUnliker:
             print(f"{ConsoleColors.RED}[✗] Failed to save configuration: {str(e)}{ConsoleColors.RESET}")
 
     def _load_following(self) -> Set[str]:
-        """Load the set of usernames the account follows from following.json"""
         following_file = 'following.json'
         if not os.path.exists(following_file):
             logging.info("following.json not found — following filter disabled")
@@ -515,20 +494,12 @@ class InstagramUnliker:
 
     @staticmethod
     def _parse_liked_post(post: dict):
-        """
-        Parse a single entry from liked_posts.json (new flat-list format).
-
-        Returns (url, post_username) or (None, None) if the entry is malformed.
-        The post_username is lowercased for consistent comparison.
-        """
         url = None
         post_username = None
         try:
             for lv in post.get('label_values', []):
-                # Top-level URL entry
                 if lv.get('label') == 'URL' and lv.get('value'):
                     url = lv['value']
-                # Owner block — nested dict structure
                 if lv.get('title') == 'Owner':
                     for owner_entry in lv.get('dict', []):
                         for field in owner_entry.get('dict', []):
@@ -539,7 +510,6 @@ class InstagramUnliker:
         return url, post_username
 
     def unlike_posts(self, username: str):
-        """Unlike reels using liked_posts.json, skipping followed accounts and excluded users"""
         account_file = self.accounts_dir / f"{username}.json"
         progress_bar = None
 
@@ -555,7 +525,6 @@ class InstagramUnliker:
 
             print(f"\n{ConsoleColors.CYAN}Starting to unlike reels for @{username}...{ConsoleColors.RESET}")
 
-            # Load following list for skip logic
             following = self._load_following()
             if following:
                 print(f"{ConsoleColors.BLUE}ℹ️  Loaded {len(following)} followed accounts — their reels will be skipped{ConsoleColors.RESET}")
@@ -585,16 +554,13 @@ class InstagramUnliker:
                 with open('liked_posts.json', 'r') as f:
                     raw_posts = json.load(f)
 
-                # liked_posts.json is a flat list in the new export format
                 if isinstance(raw_posts, dict):
-                    # Fallback: old format wrapper key
                     raw_posts = raw_posts.get('likes_media_likes', [])
 
                 if not raw_posts:
                     print(f"{ConsoleColors.YELLOW}[!] No liked posts found in liked_posts.json{ConsoleColors.RESET}")
                     return
 
-                # ── Filter pass ──────────────────────────────────────────────
                 reels_only: list = []
                 skipped_not_reel = 0
                 skipped_following = 0
@@ -603,24 +569,20 @@ class InstagramUnliker:
                 for post in raw_posts:
                     url, post_username = self._parse_liked_post(post)
 
-                    # Must be a reel URL
                     if not url or '/reel/' not in url:
                         skipped_not_reel += 1
                         continue
 
-                    # Skip accounts we follow
                     if post_username and post_username in following:
                         skipped_following += 1
                         logging.debug(f"Skipping reel from followed account: @{post_username}")
                         continue
 
-                    # Skip manually excluded users
                     if post_username and post_username in self.excluded_users:
                         skipped_excluded += 1
                         logging.debug(f"Skipping reel from excluded user: @{post_username}")
                         continue
 
-                    # Store parsed values alongside the post for the loop below
                     reels_only.append((post, url, post_username))
 
                 total_posts = len(reels_only)
@@ -655,7 +617,6 @@ class InstagramUnliker:
 
                         media_id = instagram_code_to_media_id(url)
 
-                        # Unlike with retry mechanism
                         for retry in range(CONFIG['max_retries']):
                             try:
                                 client.unlike(media_id)
@@ -672,7 +633,6 @@ class InstagramUnliker:
                         account_data['total_unliked'] += 1
                         progress_bar.update(1)
 
-                        # Random break
                         if random.random() < CONFIG['break']['probability']:
                             break_time = random.uniform(CONFIG['break']['min'], CONFIG['break']['max'])
                             progress_bar.write(f"{ConsoleColors.BLUE}[*] Taking a break for {break_time/60:.1f} minutes...{ConsoleColors.RESET}")
@@ -684,13 +644,12 @@ class InstagramUnliker:
                         progress_bar.write(f"{ConsoleColors.RED}[✗] {error_msg}{ConsoleColors.RESET}")
                         account_data['last_error'] = error_msg
                         failed_urls.append(url)
-                        time.sleep(300)  # 5 minute cooldown
+                        time.sleep(300)
 
             finally:
                 if progress_bar is not None:
                     progress_bar.close()
 
-            # Update account stats
             account_data['last_run'] = datetime.now().isoformat()
             self._write_account(account_file, account_data)
 
@@ -709,13 +668,11 @@ class InstagramUnliker:
             print(f"\n{ConsoleColors.RED}[✗] {error_msg}{ConsoleColors.RESET}")
 
     def center_text_in_box(text, box_width=48):
-        """Center text in a box line, accounting for color codes"""
         visible_length = get_visible_length(text)
         padding = (box_width - 2 - visible_length) // 2
         return f"║{' ' * padding}{text}{' ' * (box_width - 2 - visible_length - padding)}║"
 
     def show_menu(self):
-        """Display interactive menu with improved UI"""
         while True:
             print(f"\n{ConsoleColors.CYAN}{ConsoleColors.BOLD}╔{'═' * 46}╗")
             print(InstagramUnliker.center_text_in_box(f"{ConsoleColors.BOLD}Instagram Mass Unliker{ConsoleColors.RESET}{ConsoleColors.CYAN}{ConsoleColors.BOLD}"))
@@ -779,7 +736,6 @@ class InstagramUnliker:
                 time.sleep(2)
 
     def _start_unliking_menu(self):
-        """Display account selection menu for unliking"""
         accounts = self.list_accounts()
         if not accounts:
             print(f"{ConsoleColors.RED}[✗] No accounts configured. Please add an account first.{ConsoleColors.RESET}")
@@ -819,7 +775,6 @@ class InstagramUnliker:
             print(f"{ConsoleColors.RED}[✗] Error: {str(e)}{ConsoleColors.RESET}")
 
     def show_statistics(self):
-        """Display statistics with improved UI"""
         accounts = self.list_accounts()
         if not accounts:
             print(f"{ConsoleColors.YELLOW}No accounts added yet{ConsoleColors.RESET}")
@@ -851,7 +806,6 @@ class InstagramUnliker:
         input(f"\n{ConsoleColors.BOLD}Press Enter to continue...{ConsoleColors.RESET}")
 
     def show_settings(self):
-        """Display and modify settings with enhanced UI"""
         while True:
             print(f"\n{ConsoleColors.CYAN}{ConsoleColors.BOLD}╔══════════════════════════════════╗")
             print(f"║          Settings Menu           ║")
@@ -924,7 +878,6 @@ class InstagramUnliker:
                 break
 
     def check_system_requirements(self) -> bool:
-        """Check if system meets all requirements"""
         try:
             try:
                 import psutil
@@ -941,7 +894,6 @@ class InstagramUnliker:
             return False
 
     def check_dependencies(self) -> bool:
-        """Check and validate all required dependencies"""
         try:
             import importlib.util
             
@@ -968,19 +920,16 @@ class InstagramUnliker:
             return False
 
 def instagram_code_to_media_id(code):
-    """Convert Instagram shortcode to media ID"""
     charmap = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
     code = code.split('/')[-2]
     return sum(charmap.index(char) * (64 ** i) for i, char in enumerate(reversed(code)))
 
 def get_visible_length(text):
-    """Calculate the visible length of text by removing ANSI color codes"""
     import re
     ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     return len(ansi_escape.sub('', text))
 
 def menu_line(number, text, box_width=40):
-    """Create a properly aligned menu line with consistent formatting"""
     prefix = f"│ {ConsoleColors.BOLD}{number}.{ConsoleColors.RESET} {ConsoleColors.WHITE}"
     content = f"{text}{ConsoleColors.RESET}"
     visible_length = get_visible_length(f"{prefix}{content}")
@@ -988,7 +937,6 @@ def menu_line(number, text, box_width=40):
     return f"{prefix}{content}{' ' * padding}│{ConsoleColors.RESET}"
 
 def main():
-    """Main entry point with improved initialization and dependency checking"""
     try:
         print("\nWelcome to Instagram Mass Unliker!")
         print("Checking system requirements...")
