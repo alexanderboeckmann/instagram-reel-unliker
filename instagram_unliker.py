@@ -30,6 +30,7 @@ DATA_DIR = BASE_DIR / "data"
 LIKED_POSTS_PATH = DATA_DIR / "liked_posts.json"
 FOLLOWING_PATH = DATA_DIR / "following.json"
 IMPORT_META_PATH = DATA_DIR / "import_meta.json"
+REQUIREMENTS_PATH = BASE_DIR / "requirements.txt"
 EXPORT_SEARCH_DIRS = [Path.home() / "Downloads", Path.home() / "Desktop", BASE_DIR]
 
 logging.basicConfig(
@@ -124,9 +125,9 @@ class InstagramUnliker:
     def __init__(self):
         logging.info("Starting Instagram Unliker application...")
         
-        self.config_file = "config.json"
-        self.accounts_dir = Path("accounts")
-        self.logs_dir = Path("logs")
+        self.config_file = BASE_DIR / "config.json"
+        self.accounts_dir = BASE_DIR / "accounts"
+        self.logs_dir = BASE_DIR / "logs"
         self.running = True
         self.excluded_users: Set[str] = set()
         self.sessions = SessionStore()
@@ -140,10 +141,10 @@ class InstagramUnliker:
         self._migrate_credentials()
         
     def _migrate_credentials(self):
-        legacy = Path("ensta-session.json")
+        legacy = BASE_DIR / "ensta-session.json"
         if legacy.exists():
             try:
-                data = json.loads(legacy.read_text())
+                data = json.loads(legacy.read_text(encoding='utf-8'))
                 owner = data.get('identifier') or data.get('username')
                 if owner and self.sessions.save(owner, json.dumps(data)):
                     print(f"{ConsoleColors.GREEN}[✓] Moved @{owner}'s login session into the Keychain{ConsoleColors.RESET}")
@@ -154,7 +155,7 @@ class InstagramUnliker:
 
         for account_file in sorted(self.accounts_dir.glob("*.json")):
             try:
-                data = json.loads(account_file.read_text())
+                data = json.loads(account_file.read_text(encoding='utf-8'))
             except Exception:
                 continue
             if data.pop('password', None) is not None:
@@ -165,7 +166,7 @@ class InstagramUnliker:
 
     def _write_account(self, account_file: Path, data: dict):
         data.pop('password', None)
-        with open(account_file, 'w') as f:
+        with open(account_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=4)
         try:
             os.chmod(account_file, 0o600)
@@ -207,10 +208,11 @@ class InstagramUnliker:
     def _install_pip(self):
         try:
             import urllib.request
-            urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", "get-pip.py")
-            subprocess.check_call([sys.executable, "get-pip.py"])
+            with tempfile.TemporaryDirectory() as tmp:
+                bootstrap = os.path.join(tmp, "get-pip.py")
+                urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", bootstrap)
+                subprocess.check_call([sys.executable, bootstrap])
             logging.info("Successfully installed pip")
-            os.remove("get-pip.py")
         except Exception as e:
             logging.error(f"Failed to install pip: {str(e)}")
             print("Please visit https://pip.pypa.io/en/stable/installation/ for manual installation instructions")
@@ -227,7 +229,6 @@ class InstagramUnliker:
         sys.exit(0)
         
     def setup_logging(self):
-        self.logs_dir = Path("logs")
         self.logs_dir.mkdir(exist_ok=True)
         
         log_file = self.logs_dir / "unliker.log"
@@ -290,21 +291,18 @@ class InstagramUnliker:
 
     def install_requirements(self) -> bool:
         try:
-            subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "ensta"], 
-                          stdout=subprocess.PIPE, 
-                          stderr=subprocess.PIPE)
-            
-            result = subprocess.run([sys.executable, "-m", "pip", "install", "--no-cache-dir", "ensta==5.2.9", "keyring"],
-                                  stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE)
-            
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--force-reinstall", "-r", str(REQUIREMENTS_PATH)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE)
+
             if result.returncode != 0:
-                logging.error(f"Failed to install ensta: {result.stderr.decode()}")
-                print(f"{ConsoleColors.RED}[✗] Failed to install ensta. Error: {result.stderr.decode()}{ConsoleColors.RESET}")
+                logging.error(f"Failed to install dependencies: {result.stderr.decode()}")
+                print(f"{ConsoleColors.RED}[✗] Failed to install dependencies. Error: {result.stderr.decode()}{ConsoleColors.RESET}")
                 return False
-                
-            logging.info("Successfully installed ensta")
-            print(f"{ConsoleColors.GREEN}[✓] Successfully installed ensta{ConsoleColors.RESET}")
+
+            logging.info("Successfully installed dependencies")
+            print(f"{ConsoleColors.GREEN}[✓] Successfully installed dependencies{ConsoleColors.RESET}")
             return True
             
         except Exception as e:
@@ -314,12 +312,12 @@ class InstagramUnliker:
 
     def check_and_create_config(self):
         if not os.path.exists(self.config_file):
-            with open(self.config_file, 'w') as f:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(CONFIG, f, indent=4)
             print(f"{ConsoleColors.GREEN}[✓] Created default configuration file{ConsoleColors.RESET}")
         else:
             try:
-                with open(self.config_file, 'r') as f:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
                     loaded_config = json.load(f)
                     for key, value in loaded_config.items():
                         if key in CONFIG:
@@ -480,7 +478,7 @@ class InstagramUnliker:
 
     def save_config(self):
         try:
-            with open(self.config_file, 'w') as f:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(CONFIG, f, indent=4)
         except Exception as e:
             print(f"{ConsoleColors.RED}[✗] Failed to save configuration: {str(e)}{ConsoleColors.RESET}")
@@ -567,7 +565,7 @@ class InstagramUnliker:
     @staticmethod
     def _classify_json(path: Path) -> Optional[str]:
         try:
-            with open(path, 'r') as f:
+            with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError):
             return None
@@ -635,7 +633,7 @@ class InstagramUnliker:
                 "Instagram and choose format: JSON."
             )
         try:
-            with open(path, 'r') as f:
+            with open(path, 'r', encoding='utf-8') as f:
                 raw = json.load(f)
         except json.JSONDecodeError as e:
             raise ValueError(f"Could not read {path.name} as JSON: {e}")
@@ -663,7 +661,7 @@ class InstagramUnliker:
     @staticmethod
     def _validate_following(path: Path) -> int:
         try:
-            with open(path, 'r') as f:
+            with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError) as e:
             raise ValueError(f"Could not read {path.name} as JSON: {e}")
@@ -674,7 +672,7 @@ class InstagramUnliker:
     @staticmethod
     def _read_import_meta() -> Optional[dict]:
         try:
-            return json.loads(IMPORT_META_PATH.read_text())
+            return json.loads(IMPORT_META_PATH.read_text(encoding='utf-8'))
         except (OSError, json.JSONDecodeError):
             return None
 
@@ -687,7 +685,7 @@ class InstagramUnliker:
     def _ask_for_source(self) -> Optional[Path]:
         candidates = self._discover_exports()
         if candidates:
-            print(f"\n{ConsoleColors.BLUE}Exports found on this Mac:{ConsoleColors.RESET}")
+            print(f"\n{ConsoleColors.BLUE}Exports found on this machine:{ConsoleColors.RESET}")
             for i, candidate in enumerate(candidates, 1):
                 kind = "zip" if candidate.is_file() else "folder"
                 print(f"  {ConsoleColors.BOLD}{i}.{ConsoleColors.RESET} {candidate.name} "
@@ -781,7 +779,7 @@ class InstagramUnliker:
             meta['following'] = following_count
         meta.update({'source': source.name, 'imported': datetime.now().strftime('%Y-%m-%d')})
         try:
-            IMPORT_META_PATH.write_text(json.dumps(meta, indent=2))
+            IMPORT_META_PATH.write_text(json.dumps(meta, indent=2), encoding='utf-8')
         except OSError as e:
             logging.warning(f"Could not write import metadata: {e}")
 
@@ -794,7 +792,7 @@ class InstagramUnliker:
             logging.info("following.json not found — following filter disabled")
             return set()
         try:
-            with open(FOLLOWING_PATH, 'r') as f:
+            with open(FOLLOWING_PATH, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             following = {
                 entry['title'].lower()
@@ -840,7 +838,7 @@ class InstagramUnliker:
                 return
 
         try:
-            with open(account_file, 'r') as f:
+            with open(account_file, 'r', encoding='utf-8') as f:
                 account_data = json.load(f)
 
             print(f"\n{ConsoleColors.CYAN}Starting to unlike reels for @{username}...{ConsoleColors.RESET}")
@@ -865,7 +863,7 @@ class InstagramUnliker:
                 return
 
             try:
-                with open(LIKED_POSTS_PATH, 'r') as f:
+                with open(LIKED_POSTS_PATH, 'r', encoding='utf-8') as f:
                     raw_posts = json.load(f)
 
                 if isinstance(raw_posts, dict):
@@ -1057,6 +1055,8 @@ class InstagramUnliker:
                 print(f"\n\n{ConsoleColors.GREEN}✨ Thanks for using Instagram Unliker!")
                 print(f"👋 Have a great day!{ConsoleColors.RESET}")
                 break
+            except EOFError:
+                break
             except Exception as e:
                 print(f"\n{ConsoleColors.RED}✗ Error: {str(e)}{ConsoleColors.RESET}")
                 time.sleep(2)
@@ -1074,7 +1074,7 @@ class InstagramUnliker:
             account_file = self.accounts_dir / f"{acc}.json"
             status = "Ready"
             if account_file.exists():
-                with open(account_file) as f:
+                with open(account_file, encoding='utf-8') as f:
                     data = json.load(f)
                     if data.get('last_error'):
                         status = f"Error"
@@ -1114,7 +1114,7 @@ class InstagramUnliker:
         for username in accounts:
             account_file = self.accounts_dir / f"{username}.json"
             try:
-                with open(account_file, 'r') as f:
+                with open(account_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     
                 total_unliked += data.get('total_unliked', 0)
@@ -1204,20 +1204,8 @@ class InstagramUnliker:
                 break
 
     def check_system_requirements(self) -> bool:
-        try:
-            try:
-                import psutil
-            except ImportError:
-                logging.warning("psutil not installed. Installing...")
-                if not self.install_requirements():
-                    return False
-
-            os_name = platform.system()
-            logging.info(f"Operating System: {os_name}")
-            return True
-        except Exception as e:
-            logging.error(f"Error checking system requirements: {str(e)}")
-            return False
+        logging.info(f"Operating System: {platform.system()}")
+        return True
 
     def check_dependencies(self) -> bool:
         try:

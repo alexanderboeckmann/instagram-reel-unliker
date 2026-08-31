@@ -1,0 +1,4 @@
+ensta==5.2.9
+moviepy<2.0
+tqdm==4.67.1
+keyring
