@@ -20,6 +20,7 @@ import shlex
 import zipfile
 import argparse
 import re
+import fcntl
 from logging.handlers import RotatingFileHandler
 import atexit
 
@@ -47,6 +48,23 @@ CONTENT_MODES = {
 }
 KIND_LABEL = {'reel': 'Reel', 'p': 'Post', 'tv': 'Video'}
 URL_KIND_RE = re.compile(r'instagram\.com/(reel|p|tv)/')
+SHORTCODE_LENGTH = 11
+
+
+class UnlikeRejected(Exception):
+    pass
+
+
+def _media_settled(client, media_id) -> bool:
+    try:
+        response = client.session.get(f"https://i.instagram.com/api/v1/media/{media_id}/info/")
+        if response.status_code == 404:
+            return True
+        items = response.json().get('items')
+        return not items or not items[0].get('has_liked', False)
+    except Exception as e:
+        logging.debug(f"Could not check media {media_id}: {e}")
+        return False
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -69,7 +87,8 @@ CONFIG = {
     "content": "reels",
     "log_level": "INFO",
     "max_retries": 3,
-    "retry_delay": 60
+    "retry_delay": 60,
+    "max_consecutive_failures": 3
 }
 
 def _stub_unused_ensta_deps():
@@ -229,9 +248,32 @@ SETTINGS = [
             lambda: CONFIG['max_retries'], '', 'Enter new maximum retries', int),
     Setting('Retry Settings', 'Retry Delay', ('retry_delay',),
             lambda: CONFIG['retry_delay'], 'seconds', 'Enter new retry delay (seconds)', int),
+    Setting('Retry Settings', 'Stop After', ('max_consecutive_failures',),
+            lambda: CONFIG['max_consecutive_failures'], 'failures in a row',
+            'Stop the run after how many failures in a row?', int),
     Setting('What to unlike', 'Content', ('content',),
             content_mode, '', 'Unlike which content? (1. reels  2. posts  3. both)', _content_choice),
 ]
+
+
+SESSION_KEYS = ("bearer", "user_id", "username", "phone_id", "identifier", "device_id")
+
+
+def _session_blob(client) -> str:
+    return json.dumps({key: getattr(client, key) for key in SESSION_KEYS})
+
+
+def _reusable_session(cached: str, username: str) -> str:
+    if not cached:
+        return ""
+    try:
+        data = json.loads(cached)
+    except (TypeError, ValueError):
+        return ""
+    if data.get("identifier") != username or not all(data.get(key) for key in SESSION_KEYS):
+        logging.info("Stored session is not in the mobile format — logging in again")
+        return ""
+    return cached
 
 
 class SessionStore:
@@ -360,14 +402,16 @@ class InstagramUnliker:
         return getpass(f"{ConsoleColors.BOLD}Password for @{username} (not echoed): {ConsoleColors.RESET}").strip()
 
     def _login(self, username: str):
-        from ensta import Web
-        saver = lambda data: self.sessions.save(username, data)
+        from ensta import Mobile
+        from ensta.lib.Exceptions import AuthenticationError, SessionError
 
-        cached = self.sessions.load(username)
+        cached = _reusable_session(self.sessions.load(username), username)
         if cached:
             try:
-                return Web(username, "", load=lambda: cached, save=saver)
-            except Exception as e:
+                client = Mobile(username, "", save_folder="", session_data=cached, skip_auth_check=True)
+                client.private_info()
+                return client
+            except (AuthenticationError, SessionError) as e:
                 logging.info(f"Stored session for {username} rejected ({e}), re-authenticating")
                 self.sessions.delete(username)
                 warn("Saved session expired")
@@ -375,7 +419,9 @@ class InstagramUnliker:
         password = self._prompt_password(username)
         if not password:
             raise ValueError("No password provided")
-        return Web(username, password, load=lambda: "", save=saver)
+        client = Mobile(username, password, save_folder="", skip_auth_check=True)
+        self.sessions.save(username, _session_blob(client))
+        return client
 
     @property
     def excluded_users(self) -> Set[str]:
@@ -1039,12 +1085,17 @@ class InstagramUnliker:
             url, post_username = cls._parse_liked_post(post)
             yield post, url, post_username
 
-    def _unlike_with_retry(self, client, media_id):
+    def _unlike_with_retry(self, client, media_id) -> bool:
         attempts = CONFIG['max_retries']
         for retry in range(attempts):
             try:
-                client.unlike(media_id)
-                return
+                if client.unlike(str(media_id)):
+                    return True
+                if _media_settled(client, media_id):
+                    return False
+                raise UnlikeRejected("Instagram did not accept the unlike")
+            except UnlikeRejected:
+                raise
             except Exception as e:
                 if retry < attempts - 1 and self.running:
                     warn(f"Attempt {retry + 1}/{attempts} failed: {e} — "
@@ -1087,8 +1138,7 @@ class InstagramUnliker:
 
             try:
                 client = self._login(account_data['username'])
-                account = client.private_info()
-                ok(f"Logged in as @{account.username}")
+                ok(f"Logged in as @{client.username}")
             except Exception as e:
                 fail(f"Login failed: {e}")
                 note("Check your username and password")
@@ -1157,7 +1207,11 @@ class InstagramUnliker:
                      f"{total_posts} {noun} is roughly {_human_duration(per_reel * total_posts)}")
 
                 unliked_count = 0
+                gone_count = 0
+                skipped_unreadable = 0
                 failed_urls: list = []
+                consecutive_failures = 0
+                aborted = False
                 self.running = True
 
                 bar_desc = f"Unliking {noun}"
@@ -1176,14 +1230,27 @@ class InstagramUnliker:
                     if not self.running:
                         break
                     try:
+                        media_id = instagram_code_to_media_id(url)
+                    except ValueError:
+                        warn(f"Skipping {_reel_code(url)} — its link is not one we can read")
+                        logging.warning(f"Unreadable shortcode, skipping: {url}")
+                        skipped_unreadable += 1
+                        progress_bar.update(1)
+                        continue
+
+                    try:
                         self._sleep(pending)
                         if not self.running:
                             break
 
-                        self._unlike_with_retry(client, instagram_code_to_media_id(url))
+                        removed = self._unlike_with_retry(client, media_id)
 
-                        unliked_count += 1
-                        account_data['total_unliked'] += 1
+                        consecutive_failures = 0
+                        if removed:
+                            unliked_count += 1
+                            account_data['total_unliked'] += 1
+                        else:
+                            gone_count += 1
                         resume.record(url)
                         account_data['last_run'] = datetime.now().isoformat()
                         self._write_account(account_file, account_data)
@@ -1192,7 +1259,10 @@ class InstagramUnliker:
                         pending = self._next_delay(username)
                         owner = f" · @{post_username}" if post_username else ""
                         upcoming = f" · next in {_human_duration(pending)}" if unliked_count < total_posts else ""
-                        ok(f"{unliked_count}/{total_posts}{owner}{upcoming}")
+                        if removed:
+                            ok(f"{unliked_count}/{total_posts}{owner}{upcoming}")
+                        else:
+                            note(f"{_reel_code(url)} was already gone{owner}{upcoming}")
 
                         if random.random() < CONFIG['break']['probability']:
                             break_time = random.uniform(CONFIG['break']['min'], CONFIG['break']['max'])
@@ -1207,6 +1277,15 @@ class InstagramUnliker:
                             logging.debug("Failure detail", exc_info=True)
                         account_data['last_error'] = error_msg
                         failed_urls.append(url)
+                        consecutive_failures += 1
+                        if consecutive_failures >= CONFIG['max_consecutive_failures']:
+                            fail(f"Stopping — {consecutive_failures} in a row failed, so nothing is "
+                                 f"getting through", blank=True)
+                            note("Instagram is refusing these. Leave the account alone for a day, "
+                                 "then try again with slower delays.")
+                            aborted = True
+                            self.running = False
+                            break
                         progress_bar.set_description("Cooling down")
                         self._wait(300, "Cooling down after that failure")
                         progress_bar.set_description(bar_desc)
@@ -1221,8 +1300,15 @@ class InstagramUnliker:
                 account_data['last_run'] = datetime.now().isoformat()
                 self._write_account(account_file, account_data)
 
-            ok(f"Unliking complete for {username}", blank=True)
+            if aborted:
+                warn(f"Unliking stopped early for {username}", blank=True)
+            else:
+                ok(f"Unliking complete for {username}", blank=True)
             note(f"Unliked       : {unliked_count}")
+            if gone_count:
+                note(f"Already gone  : {gone_count}")
+            if skipped_unreadable:
+                note(f"Unreadable    : {skipped_unreadable}")
             if failed_urls:
                 note(f"Failed        : {len(failed_urls)}")
             remaining = total_posts - unliked_count
@@ -1428,7 +1514,7 @@ class InstagramUnliker:
 
 def instagram_code_to_media_id(code):
     charmap = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
-    code = code.split('/')[-2]
+    code = code.split('/')[-2][:SHORTCODE_LENGTH]
     return sum(charmap.index(char) * (64 ** i) for i, char in enumerate(reversed(code)))
 
 def get_visible_length(text):
@@ -1447,6 +1533,18 @@ def menu_line(number, text, box_width=40):
     padding = box_width - visible_length + 1
     return f"{prefix}{content}{' ' * padding}│{ConsoleColors.RESET}"
 
+def claim_single_instance() -> bool:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    handle = open(DATA_DIR / "unliker.lock", 'w')
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return False
+    atexit.register(handle.close)
+    return True
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         prog="unlike",
@@ -1463,6 +1561,11 @@ def main():
     try:
         args = parse_args()
         if not InstagramUnliker.check_python_version():
+            sys.exit(1)
+
+        if not claim_single_instance():
+            fail("Another copy of the unliker is already running.")
+            note("Close that one first — two at once makes Instagram block the unlikes.")
             sys.exit(1)
 
         unliker = InstagramUnliker()
