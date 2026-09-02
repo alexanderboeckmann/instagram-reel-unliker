@@ -15,6 +15,7 @@ from typing import Optional, List, NamedTuple, Tuple, Set
 from getpass import getpass
 import signal
 from tqdm import tqdm
+from tqdm.utils import disp_len
 import tempfile
 import shlex
 import zipfile
@@ -128,9 +129,41 @@ class ConsoleColors:
 
 
 _active_bar = None
+_resized_at = None
+_bar_len = 0
+
+
+def _bar_printer(fp):
+    def draw(text: str):
+        global _bar_len
+        try:
+            width = os.get_terminal_size(fp.fileno()).columns
+        except (OSError, ValueError, AttributeError):
+            width = 80
+        rows = max(1, -(-_bar_len // max(width, 1)))
+        try:
+            fp.write((f"\033[{rows - 1}A" if rows > 1 else "") + "\r\033[J" + text)
+            fp.flush()
+        except (OSError, ValueError):
+            pass
+        _bar_len = disp_len(text)
+    return draw
+
+
+def _repaint_if_resized():
+    global _resized_at
+    if _resized_at is None or time.monotonic() - _resized_at < 0.3:
+        return
+    _resized_at = None
+    if _active_bar is not None:
+        try:
+            _active_bar.refresh()
+        except Exception:
+            pass
 
 
 def _emit(line: str):
+    _repaint_if_resized()
     try:
         _active_bar.write(line) if _active_bar else print(line)
     except (OSError, ValueError):
@@ -196,6 +229,22 @@ def _human_duration(seconds: float) -> str:
         return f"{h}h {m}m" if m else f"{h}h"
     d, h = divmod(seconds // 3600, 24)
     return f"{d}d {h}h" if h else f"{d}d"
+
+
+def _eta_text(seconds: float) -> str:
+    finish = datetime.now() + timedelta(seconds=seconds)
+    clock = finish.strftime('%H:%M' if seconds < 43200 else '%a %H:%M')
+    return f"{_human_duration(seconds)} · {clock}"
+
+
+class ETABar(tqdm):
+    eta = ''
+
+    @property
+    def format_dict(self):
+        d = super().format_dict
+        d['eta'] = self.eta
+        return d
 
 
 class Setting(NamedTuple):
@@ -373,6 +422,7 @@ class InstagramUnliker:
         self.accounts_dir = BASE_DIR / "accounts"
         self.logs_dir = BASE_DIR / "logs"
         self.running = False
+        self._bar_desc = ""
 
         self.setup_logging()
         logging.info("Starting Instagram Unliker application...")
@@ -439,6 +489,13 @@ class InstagramUnliker:
             sig = getattr(signal, name, None)
             if sig is not None:
                 signal.signal(sig, self._handle_shutdown)
+        if hasattr(signal, 'SIGWINCH'):
+            signal.signal(signal.SIGWINCH, self._handle_resize)
+
+    @staticmethod
+    def _handle_resize(signum, frame):
+        global _resized_at
+        _resized_at = time.monotonic()
         
     def _handle_shutdown(self, signum, frame):
         if not self.running:
@@ -449,10 +506,19 @@ class InstagramUnliker:
     def _sleep(self, seconds: float):
         end = time.monotonic() + seconds
         while self.running:
+            _repaint_if_resized()
             remaining = end - time.monotonic()
             if remaining <= 0:
                 break
-            time.sleep(min(0.5, remaining))
+            time.sleep(min(0.2, remaining))
+
+    def _pause_for_retry(self, seconds: float, reason: str):
+        warn(f"Hit a snag: {reason} — pausing {_human_duration(seconds)}, then carrying on")
+        if _active_bar is not None:
+            _active_bar.set_description("Waiting it out")
+        self._sleep(seconds)
+        if _active_bar is not None:
+            _active_bar.set_description(self._bar_desc)
 
     def _wait(self, seconds: float, msg: str):
         until = (datetime.now() + timedelta(seconds=seconds)).strftime('%H:%M')
@@ -1098,14 +1164,13 @@ class InstagramUnliker:
                 raise
             except Exception as e:
                 if retry < attempts - 1 and self.running:
-                    warn(f"Attempt {retry + 1}/{attempts} failed: {e} — "
-                         f"retrying in {_human_duration(CONFIG['retry_delay'])}")
-                    self._sleep(CONFIG['retry_delay'])
+                    logging.warning(f"Unlike attempt {retry + 1}/{attempts} failed: {e}")
+                    self._pause_for_retry(CONFIG['retry_delay'], str(e) or type(e).__name__)
                 else:
                     raise
 
     def unlike_posts(self, username: str, fingerprint: Optional[str] = None):
-        global _active_bar
+        global _active_bar, _bar_len
         account_file = self._account_path(username)
         progress_bar = None
         resume = None
@@ -1177,10 +1242,12 @@ class InstagramUnliker:
                     targets.append((post, url, post_username))
 
                 resume = ProgressStore(username, fingerprint or self._export_fingerprint())
+                already_done = sum(1 for entry in targets if entry[1] in resume.done)
                 if resume.done:
                     targets = [entry for entry in targets if entry[1] not in resume.done]
-                already_done = len(resume.done)
                 total_posts = len(targets)
+                overall_total = already_done + total_posts
+                position = already_done
 
                 print(f"\n{ConsoleColors.BLUE}Filter summary:{ConsoleColors.RESET}")
                 print(f"  {ConsoleColors.GREEN}{spec.target_label:<16}: {total_posts}{ConsoleColors.RESET}")
@@ -1215,13 +1282,29 @@ class InstagramUnliker:
                 self.running = True
 
                 bar_desc = f"Unliking {noun}"
-                progress_bar = tqdm(
-                    total=total_posts,
+                self._bar_desc = bar_desc
+                progress_bar = ETABar(
+                    total=overall_total,
+                    initial=already_done,
                     desc=bar_desc,
                     file=sys.stdout,
-                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [ETA: {remaining}]'
+                    dynamic_ncols=True,
+                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [ETA: {eta}]'
                 )
+                progress_bar.eta = _eta_text(per_reel * total_posts)
+                if sys.stdout.isatty():
+                    _bar_len = 0
+                    progress_bar.sp = _bar_printer(progress_bar.fp)
                 _active_bar = progress_bar
+                run_started = time.monotonic()
+                done_this_run = 0
+
+                def refresh_eta():
+                    trust = min(done_this_run / 50, 1.0)
+                    observed = ((time.monotonic() - run_started) / done_this_run
+                                if done_this_run else per_reel)
+                    per_item = trust * observed + (1 - trust) * per_reel
+                    progress_bar.eta = _eta_text(per_item * (overall_total - position))
 
                 pending = self._next_delay(username)
                 note(f"Starting — first in {_human_duration(pending)}")
@@ -1229,12 +1312,15 @@ class InstagramUnliker:
                 for post, url, post_username in targets:
                     if not self.running:
                         break
+                    _repaint_if_resized()
                     try:
                         media_id = instagram_code_to_media_id(url)
                     except ValueError:
                         warn(f"Skipping {_reel_code(url)} — its link is not one we can read")
                         logging.warning(f"Unreadable shortcode, skipping: {url}")
                         skipped_unreadable += 1
+                        position += 1
+                        refresh_eta()
                         progress_bar.update(1)
                         continue
 
@@ -1252,15 +1338,18 @@ class InstagramUnliker:
                         else:
                             gone_count += 1
                         resume.record(url)
+                        position += 1
+                        done_this_run += 1
+                        refresh_eta()
                         account_data['last_run'] = datetime.now().isoformat()
                         self._write_account(account_file, account_data)
                         progress_bar.update(1)
 
                         pending = self._next_delay(username)
                         owner = f" · @{post_username}" if post_username else ""
-                        upcoming = f" · next in {_human_duration(pending)}" if unliked_count < total_posts else ""
+                        upcoming = f" · next in {_human_duration(pending)}" if position < overall_total else ""
                         if removed:
-                            ok(f"{unliked_count}/{total_posts}{owner}{upcoming}")
+                            ok(f"{position}/{overall_total}{owner}{upcoming}")
                         else:
                             note(f"{_reel_code(url)} was already gone{owner}{upcoming}")
 
@@ -1311,7 +1400,7 @@ class InstagramUnliker:
                 note(f"Unreadable    : {skipped_unreadable}")
             if failed_urls:
                 note(f"Failed        : {len(failed_urls)}")
-            remaining = total_posts - unliked_count
+            remaining = overall_total - position
             if remaining:
                 note(f"Left to do    : {remaining} — pick 4 again to resume where this stopped")
             
