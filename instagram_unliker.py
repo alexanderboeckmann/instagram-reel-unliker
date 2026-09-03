@@ -681,6 +681,7 @@ class InstagramUnliker:
             "last_run": None,
             "total_unliked": 0,
             "last_error": None,
+            "last_error_at": None,
             "created_at": datetime.now().isoformat()
         }
         
@@ -1375,6 +1376,7 @@ class InstagramUnliker:
 
                             consecutive_failures = 0
                             consecutive_rejections = 0
+                            account_data['last_error'] = None
                             if removed:
                                 unliked_count += 1
                                 account_data['total_unliked'] += 1
@@ -1410,6 +1412,7 @@ class InstagramUnliker:
                             if logging.getLogger().isEnabledFor(logging.DEBUG):
                                 logging.debug("Failure detail", exc_info=True)
                             account_data['last_error'] = error_msg
+                            account_data['last_error_at'] = datetime.now().isoformat()
                             failed_urls.append((url, post_username))
                             consecutive_failures += 1
                             consecutive_rejections = (consecutive_rejections + 1
@@ -1558,10 +1561,8 @@ class InstagramUnliker:
             if account_file.exists():
                 with open(account_file, encoding='utf-8') as f:
                     data = json.load(f)
-                    if data.get('last_error'):
-                        status = "Error"
-                    elif data.get('last_run'):
-                        status = f"Last: {datetime.fromisoformat(data['last_run']).strftime('%Y-%m-%d %H:%M')}"
+                if data.get('last_run'):
+                    status = f"Last: {datetime.fromisoformat(data['last_run']).strftime('%Y-%m-%d %H:%M')}"
 
             done = len(ProgressStore(acc, fingerprint).done) if fingerprint else 0
             if done:
@@ -1600,7 +1601,10 @@ class InstagramUnliker:
                 print(f"  Unliked posts: {data.get('total_unliked', 0)}")
                 if data.get('last_run'):
                     print(f"  Last active: {datetime.fromisoformat(data['last_run']).strftime('%Y-%m-%d %H:%M')}")
-                fail("Status: Error") if data.get('last_error') else ok("Status: OK")
+                if data.get('last_error'):
+                    fail(f"Last error: {data['last_error']}")
+                else:
+                    ok("Status: OK")
             except Exception:
                 fail(f"Could not read data for {username}")
                 
