@@ -22,6 +22,7 @@ import zipfile
 import argparse
 import re
 import fcntl
+import socket
 from logging.handlers import RotatingFileHandler
 import atexit
 
@@ -50,10 +51,21 @@ CONTENT_MODES = {
 KIND_LABEL = {'reel': 'Reel', 'p': 'Post', 'tv': 'Video'}
 URL_KIND_RE = re.compile(r'instagram\.com/(reel|p|tv)/')
 SHORTCODE_LENGTH = 11
+NET_PROBES = (('1.1.1.1', 443), ('8.8.8.8', 53))
 
 
 class UnlikeRejected(Exception):
     pass
+
+
+def _offline() -> bool:
+    for address in NET_PROBES:
+        try:
+            socket.create_connection(address, timeout=5).close()
+            return False
+        except OSError:
+            continue
+    return True
 
 
 def _media_settled(client, media_id) -> bool:
@@ -519,6 +531,24 @@ class InstagramUnliker:
         self._sleep(seconds)
         if _active_bar is not None:
             _active_bar.set_description(self._bar_desc)
+
+    def _wait_for_network(self, poll: float = 15) -> float:
+        warn("Lost the internet connection — waiting for it to come back")
+        if _active_bar is not None:
+            _active_bar.set_description("Offline")
+        started = time.monotonic()
+        speak_up = started + 600
+        while self.running and _offline():
+            self._sleep(poll)
+            if time.monotonic() >= speak_up:
+                note(f"Still no internet after {_human_duration(time.monotonic() - started)}")
+                speak_up += 600
+        if _active_bar is not None:
+            _active_bar.set_description(self._bar_desc)
+        waited = time.monotonic() - started
+        if self.running:
+            note(f"Back online after {_human_duration(waited)} — picking up where it left off")
+        return waited
 
     def _wait(self, seconds: float, msg: str):
         until = (datetime.now() + timedelta(seconds=seconds)).strftime('%H:%M')
@@ -1163,7 +1193,7 @@ class InstagramUnliker:
             except UnlikeRejected:
                 raise
             except Exception as e:
-                if retry < attempts - 1 and self.running:
+                if retry < attempts - 1 and self.running and not _offline():
                     logging.warning(f"Unlike attempt {retry + 1}/{attempts} failed: {e}")
                     self._pause_for_retry(CONFIG['retry_delay'], str(e) or type(e).__name__)
                 else:
@@ -1278,6 +1308,7 @@ class InstagramUnliker:
                 skipped_unreadable = 0
                 failed_urls: list = []
                 consecutive_failures = 0
+                consecutive_rejections = 0
                 aborted = False
                 self.running = True
 
@@ -1324,60 +1355,81 @@ class InstagramUnliker:
                         progress_bar.update(1)
                         continue
 
-                    try:
-                        self._sleep(pending)
-                        if not self.running:
+                    which = f"from @{post_username}" if post_username else _reel_code(url)
+                    while self.running:
+                        try:
+                            self._sleep(pending)
+                            if not self.running:
+                                break
+
+                            try:
+                                removed = self._unlike_with_retry(client, media_id)
+                            except Exception as e:
+                                if not (self.running and _offline()):
+                                    raise
+                                logging.warning(f"Connection lost on {url}: {e}")
+                                run_started += self._wait_for_network()
+                                refresh_eta()
+                                progress_bar.refresh()
+                                continue
+
+                            consecutive_failures = 0
+                            consecutive_rejections = 0
+                            if removed:
+                                unliked_count += 1
+                                account_data['total_unliked'] += 1
+                            else:
+                                gone_count += 1
+                            resume.record(url)
+                            position += 1
+                            done_this_run += 1
+                            refresh_eta()
+                            account_data['last_run'] = datetime.now().isoformat()
+                            self._write_account(account_file, account_data)
+                            progress_bar.update(1)
+
+                            pending = self._next_delay(username)
+                            by = f" · @{post_username}" if post_username else ""
+                            upcoming = f" · next in {_human_duration(pending)}" if position < overall_total else ""
+                            if removed:
+                                ok(f"{position}/{overall_total}{by}{upcoming}")
+                            else:
+                                note(f"{_reel_code(url)} was already gone{by}{upcoming}")
+
+                            if random.random() < CONFIG['break']['probability']:
+                                break_time = random.uniform(CONFIG['break']['min'], CONFIG['break']['max'])
+                                progress_bar.set_description("On a break")
+                                self._wait(break_time, f"Break for {_human_duration(break_time)}")
+                                progress_bar.set_description(bar_desc)
                             break
 
-                        removed = self._unlike_with_retry(client, media_id)
-
-                        consecutive_failures = 0
-                        if removed:
-                            unliked_count += 1
-                            account_data['total_unliked'] += 1
-                        else:
-                            gone_count += 1
-                        resume.record(url)
-                        position += 1
-                        done_this_run += 1
-                        refresh_eta()
-                        account_data['last_run'] = datetime.now().isoformat()
-                        self._write_account(account_file, account_data)
-                        progress_bar.update(1)
-
-                        pending = self._next_delay(username)
-                        owner = f" · @{post_username}" if post_username else ""
-                        upcoming = f" · next in {_human_duration(pending)}" if position < overall_total else ""
-                        if removed:
-                            ok(f"{position}/{overall_total}{owner}{upcoming}")
-                        else:
-                            note(f"{_reel_code(url)} was already gone{owner}{upcoming}")
-
-                        if random.random() < CONFIG['break']['probability']:
-                            break_time = random.uniform(CONFIG['break']['min'], CONFIG['break']['max'])
-                            progress_bar.set_description("On a break")
-                            self._wait(break_time, f"Break for {_human_duration(break_time)}")
+                        except Exception as e:
+                            error_msg = f"{KIND_LABEL.get(_url_kind(url), 'Item')} {which} failed: {e}"
+                            fail(error_msg)
+                            logging.warning(f"Failed {url}: {e}")
+                            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                logging.debug("Failure detail", exc_info=True)
+                            account_data['last_error'] = error_msg
+                            failed_urls.append((url, post_username))
+                            consecutive_failures += 1
+                            consecutive_rejections = (consecutive_rejections + 1
+                                                      if isinstance(e, UnlikeRejected) else 0)
+                            if consecutive_failures >= CONFIG['max_consecutive_failures']:
+                                fail(f"Stopping — {consecutive_failures} in a row failed, so nothing is "
+                                     f"getting through", blank=True)
+                                if consecutive_rejections >= consecutive_failures:
+                                    note("Instagram is refusing these. Leave the account alone for a day, "
+                                         "then try again with slower delays.")
+                                else:
+                                    note(f"The same error keeps coming back — the last one was: {e}")
+                                    note(f"Full detail is in {self.logs_dir / 'unliker.log'}")
+                                aborted = True
+                                self.running = False
+                                break
+                            progress_bar.set_description("Cooling down")
+                            self._wait(300, "Cooling down after that failure")
                             progress_bar.set_description(bar_desc)
-
-                    except Exception as e:
-                        error_msg = f"{KIND_LABEL.get(_url_kind(url), 'Item')} {_reel_code(url)} failed: {e}"
-                        fail(error_msg)
-                        if logging.getLogger().isEnabledFor(logging.DEBUG):
-                            logging.debug("Failure detail", exc_info=True)
-                        account_data['last_error'] = error_msg
-                        failed_urls.append(url)
-                        consecutive_failures += 1
-                        if consecutive_failures >= CONFIG['max_consecutive_failures']:
-                            fail(f"Stopping — {consecutive_failures} in a row failed, so nothing is "
-                                 f"getting through", blank=True)
-                            note("Instagram is refusing these. Leave the account alone for a day, "
-                                 "then try again with slower delays.")
-                            aborted = True
-                            self.running = False
                             break
-                        progress_bar.set_description("Cooling down")
-                        self._wait(300, "Cooling down after that failure")
-                        progress_bar.set_description(bar_desc)
 
             finally:
                 self.running = False
@@ -1400,6 +1452,9 @@ class InstagramUnliker:
                 note(f"Unreadable    : {skipped_unreadable}")
             if failed_urls:
                 note(f"Failed        : {len(failed_urls)}")
+                who = [f"@{name}" if name else _reel_code(u) for u, name in failed_urls[:5]]
+                more = f" and {len(failed_urls) - 5} more" if len(failed_urls) > 5 else ""
+                note(f"Failed on     : {', '.join(who)}{more}")
             remaining = overall_total - position
             if remaining:
                 note(f"Left to do    : {remaining} — pick 4 again to resume where this stopped")

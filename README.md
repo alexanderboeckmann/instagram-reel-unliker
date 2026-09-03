@@ -93,6 +93,8 @@ Press **Ctrl-A** then **D** to leave it running in the background and get your t
 
 Two things that catch people out: type `caffeinate -is unlike` *inside* the screen session, not `screen ... caffeinate ...` from outside — done the other way it stops keeping the Mac awake the moment you detach. And `caffeinate` can't stop a closed lid from sleeping, so leave the laptop plugged in and open.
 
+If the internet does drop — the lid closes, the Wi-Fi flaps — the run doesn't count that as a failure. It says `Lost the internet connection`, checks every 15 seconds — reporting in every ten minutes that it's still waiting — and retries the same item once it's back, without counting it toward the stop-after-3 rule. Real errors still count, and they now name the account (`Reel from @travelclips failed: ...`) so you can see who they belong to.
+
 To check on a detached run without reattaching, watch the log from any window — the same lines appear there:
 
 ```bash
